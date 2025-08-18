@@ -160,10 +160,11 @@ function transformUserToV2(v1User, includeAllFields = false) {
     verified: v1User.verified || false,
     profile_image_url: v1User.profile_image_url_https,
     public_metrics: {
-      followers_count: v1User.followers_count,
-      following_count: v1User.friends_count,
-      tweet_count: v1User.statuses_count,
-      listed_count: v1User.listed_count
+      followers_count: v1User.followers_count || v1User.normal_followers_count || 0,
+      following_count: v1User.friends_count || 0,
+      tweet_count: v1User.statuses_count || 0,
+      listed_count: v1User.listed_count || 0,
+      like_count: v1User.favourites_count || 0
     }
   };
   
@@ -174,6 +175,11 @@ function transformUserToV2(v1User, includeAllFields = false) {
       v2User.profile_banner_url = v1User.profile_banner_url;
     }
     
+    // Add profile background if available
+    if (v1User.profile_background_image_url_https) {
+      v2User.profile_background_image_url = v1User.profile_background_image_url_https;
+    }
+    
     // Add entities if available
     if (v1User.entities) {
       v2User.entities = {
@@ -182,9 +188,30 @@ function transformUserToV2(v1User, includeAllFields = false) {
       };
     }
     
-    // Add pinned tweet ID if available
-    if (v1User.status?.id_str) {
+    // Add pinned tweet IDs if available
+    if (v1User.pinned_tweet_ids && v1User.pinned_tweet_ids.length > 0) {
+      v2User.pinned_tweet_id = v1User.pinned_tweet_ids_str?.[0] || v1User.pinned_tweet_ids[0]?.toString();
+    } else if (v1User.status?.id_str) {
       v2User.pinned_tweet_id = v1User.status.id_str;
+    }
+    
+    // Add withheld information if available
+    if (v1User.withheld_in_countries && v1User.withheld_in_countries.length > 0) {
+      v2User.withheld = {
+        scope: v1User.withheld_scope || 'user',
+        country_codes: v1User.withheld_in_countries
+      };
+    }
+    
+    // Add verified type
+    if (v1User.verified) {
+      v2User.verified_type = v1User.ext?.verified_type || 'legacy';
+    }
+    
+    // Add translator info
+    if (v1User.is_translator) {
+      v2User.is_translator = true;
+      v2User.translator_type = v1User.translator_type;
     }
   }
   
@@ -192,13 +219,14 @@ function transformUserToV2(v1User, includeAllFields = false) {
 }
 
 // Transform v1.1 tweet to v2 format with enhanced fields
-function transformTweetToV2(v1Tweet, includeAllFields = false) {
+function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}) {
   const v2Tweet = {
     id: v1Tweet.id_str,
     text: v1Tweet.full_text || v1Tweet.text || '',
     created_at: new Date(v1Tweet.created_at).toISOString(),
     author_id: v1Tweet.user?.id_str || v1Tweet.user_id_str || 'unknown',
-    edit_history_tweet_ids: [v1Tweet.id_str]
+    edit_history_tweet_ids: [v1Tweet.id_str],
+    reply_settings: v1Tweet.reply_settings || 'everyone'
   };
   
   // Add metrics if available
@@ -208,8 +236,9 @@ function transformTweetToV2(v1Tweet, includeAllFields = false) {
       reply_count: v1Tweet.reply_count || 0,
       like_count: v1Tweet.favorite_count || 0,
       quote_count: v1Tweet.quote_count || 0,
-      impression_count: 0,
-      bookmark_count: 0
+      impression_count: v1Tweet.impression_count || 0,
+      bookmark_count: v1Tweet.bookmark_count || 0,
+      view_count: v1Tweet.view_count || 0
     };
   }
   
@@ -230,13 +259,42 @@ function transformTweetToV2(v1Tweet, includeAllFields = false) {
       v2Tweet.possibly_sensitive = v1Tweet.possibly_sensitive;
     }
     
-    // Add reply settings
+    // Add reply settings and referenced tweets
+    const referencedTweets = [];
     if (v1Tweet.in_reply_to_status_id_str) {
       v2Tweet.in_reply_to_user_id = v1Tweet.in_reply_to_user_id_str;
-      v2Tweet.referenced_tweets = [{
+      referencedTweets.push({
         type: 'replied_to',
         id: v1Tweet.in_reply_to_status_id_str
-      }];
+      });
+    }
+    
+    // Add retweet reference and include full tweet if available
+    if (v1Tweet.retweeted_status) {
+      referencedTweets.push({
+        type: 'retweeted',
+        id: v1Tweet.retweeted_status.id_str
+      });
+      // Store retweeted tweet for includes
+      if (expansions.retweetedTweets) {
+        expansions.retweetedTweets.push(transformTweetToV2(v1Tweet.retweeted_status, includeAllFields));
+      }
+    }
+    
+    // Add quoted tweet reference and include full tweet if available
+    if (v1Tweet.quoted_status || v1Tweet.quoted_status_id_str) {
+      referencedTweets.push({
+        type: 'quoted',
+        id: v1Tweet.quoted_status_id_str || v1Tweet.quoted_status?.id_str
+      });
+      // Store quoted tweet for includes
+      if (v1Tweet.quoted_status && expansions.quotedTweets) {
+        expansions.quotedTweets.push(transformTweetToV2(v1Tweet.quoted_status, includeAllFields));
+      }
+    }
+    
+    if (referencedTweets.length > 0) {
+      v2Tweet.referenced_tweets = referencedTweets;
     }
     
     // Add conversation_id (same as tweet ID for root tweets)
@@ -277,10 +335,11 @@ function transformTweetToV2(v1Tweet, includeAllFields = false) {
         }));
       }
       
-      // Add media attachments
-      if (v1Tweet.entities.media && v1Tweet.entities.media.length > 0) {
+      // Add media attachments from extended_entities (preferred) or entities
+      const mediaEntities = v1Tweet.extended_entities?.media || v1Tweet.entities?.media;
+      if (mediaEntities && mediaEntities.length > 0) {
         v2Tweet.attachments = {
-          media_keys: v1Tweet.entities.media.map(m => m.id_str)
+          media_keys: mediaEntities.map(m => m.id_str)
         };
       }
     }
@@ -298,9 +357,125 @@ function transformTweetToV2(v1Tweet, includeAllFields = false) {
         };
       }
     }
+    
+    // Add edit controls (synthesized)
+    const createdDate = new Date(v1Tweet.created_at);
+    const editableUntil = new Date(createdDate.getTime() + 60 * 60 * 1000); // 1 hour after creation
+    v2Tweet.edit_controls = {
+      edits_remaining: 5,
+      is_edit_eligible: new Date() < editableUntil,
+      editable_until: editableUntil.toISOString()
+    };
+    
+    // Add withheld information if available
+    if (v1Tweet.withheld_in_countries && v1Tweet.withheld_in_countries.length > 0) {
+      v2Tweet.withheld = {
+        copyright: v1Tweet.withheld_copyright || false,
+        country_codes: v1Tweet.withheld_in_countries,
+        scope: v1Tweet.withheld_scope || 'tweet'
+      };
+    }
+    
+    // Add scopes if available
+    if (v1Tweet.scopes) {
+      v2Tweet.scopes = v1Tweet.scopes;
+    }
   }
   
   return v2Tweet;
+}
+
+// Build includes object for v2 response
+function buildIncludesObject(tweets, users = [], media = [], places = [], polls = []) {
+  const includes = {};
+  
+  if (users && users.length > 0) {
+    includes.users = users;
+  }
+  
+  if (media && media.length > 0) {
+    includes.media = media.map(m => {
+      const mediaObj = {
+        media_key: m.id_str || m.id,
+        type: m.type || 'photo',
+        url: m.media_url_https || m.url
+      };
+      
+      // Add preview image
+      if (m.type === 'video' || m.type === 'animated_gif') {
+        mediaObj.preview_image_url = m.media_url_https || m.preview_url;
+      }
+      
+      // Add dimensions
+      if (m.original_info) {
+        mediaObj.height = m.original_info.height;
+        mediaObj.width = m.original_info.width;
+      } else if (m.sizes?.large) {
+        mediaObj.height = m.sizes.large.h;
+        mediaObj.width = m.sizes.large.w;
+      }
+      
+      // Add video info
+      if (m.video_info) {
+        mediaObj.duration_ms = m.video_info.duration_millis;
+        if (m.video_info.variants && m.video_info.variants.length > 0) {
+          mediaObj.variants = m.video_info.variants.map(v => ({
+            bit_rate: v.bitrate,
+            content_type: v.content_type,
+            url: v.url
+          }));
+        }
+      }
+      
+      // Add alt text for accessibility
+      if (m.ext_alt_text) {
+        mediaObj.alt_text = m.ext_alt_text;
+      }
+      
+      // Add additional media info
+      if (m.additional_media_info) {
+        mediaObj.additional_info = m.additional_media_info;
+      }
+      
+      return mediaObj;
+    });
+  }
+  
+  if (places && places.length > 0) {
+    includes.places = places.map(p => ({
+      full_name: p.full_name,
+      id: p.id,
+      contained_within: p.contained_within,
+      country: p.country,
+      country_code: p.country_code,
+      geo: p.bounding_box,
+      name: p.name,
+      place_type: p.place_type
+    }));
+  }
+  
+  if (polls && polls.length > 0) {
+    includes.polls = polls;
+  }
+  
+  // Extract referenced tweets if any
+  const referencedTweets = [];
+  tweets.forEach(tweet => {
+    if (tweet.referenced_tweets) {
+      tweet.referenced_tweets.forEach(ref => {
+        if (!referencedTweets.find(t => t.id === ref.id)) {
+          // This is a placeholder - in real implementation, we'd fetch these tweets
+          referencedTweets.push({ id: ref.id });
+        }
+      });
+    }
+  });
+  
+  if (referencedTweets.length > 0) {
+    includes.tweets = referencedTweets;
+  }
+  
+  return Object.keys(includes).length > 0 ? includes : undefined;
 }
 
 // Main handler
