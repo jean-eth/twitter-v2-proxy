@@ -1338,7 +1338,7 @@ fastify.get('/2/tweets/:id', async (request, reply) => {
 // GET /2/tweets/search/recent - Search tweets (via Nitter)
 fastify.get('/2/tweets/search/recent', async (request, reply) => {
   try {
-    const { query, max_results = 10, next_token } = request.query;
+    const { query, max_results = 10, next_token, start_time, end_time } = request.query;
 
     if (!query) {
       return reply.code(400).send({
@@ -1351,13 +1351,29 @@ fastify.get('/2/tweets/search/recent', async (request, reply) => {
       });
     }
 
+    // Build search query with date filters
+    let searchQuery = query;
+    
+    // Add date filtering using Twitter's since: and until: operators
+    if (start_time) {
+      const startDate = new Date(start_time);
+      const formattedStartDate = startDate.toISOString().split('T')[0];
+      searchQuery += ` since:${formattedStartDate}`;
+    }
+    
+    if (end_time) {
+      const endDate = new Date(end_time);
+      const formattedEndDate = endDate.toISOString().split('T')[0];
+      searchQuery += ` until:${formattedEndDate}`;
+    }
+
     // Search tweets via Nitter
     const nitterResponse = await axios.get(
       `${NITTER_API}/search`,
       {
         headers: { 'User-Agent': 'Mozilla/5.0' },
         params: {
-          q: query,
+          q: searchQuery,
           cursor: next_token
         }
       }
