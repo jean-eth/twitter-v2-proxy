@@ -1558,238 +1558,70 @@ module.exports = async (req, res) => {
         });
       }
 
-      // Add date filtering to the search query if start_time or end_time are provided
-      // Twitter search supports since:YYYY-MM-DD and until:YYYY-MM-DD operators
+      const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
+
+      // Build Rettiwt search parameters
+      const searchParams = {
+        includeWords: [searchQuery],
+        count: maxResults
+      };
+
+      // Add date filtering if provided
       if (query.start_time) {
         const startDate = new Date(query.start_time);
-        const formattedStartDate = startDate.toISOString().split('T')[0];
-        searchQuery += ` since:${formattedStartDate}`;
+        searchParams.startDate = startDate.toISOString().split('T')[0];
       }
       
       if (query.end_time) {
         const endDate = new Date(query.end_time);
-        const formattedEndDate = endDate.toISOString().split('T')[0];
-        searchQuery += ` until:${formattedEndDate}`;
+        searchParams.endDate = endDate.toISOString().split('T')[0];
       }
 
       try {
-        const nitterResponse = await axios.get(
-          `${NITTER_API}/search`,
-          {
-            params: {
-              q: searchQuery,
-              cursor: query.pagination_token
-            },
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 8000
-          }
-        );
+        // Use Rettiwt for search
+        const searchResult = await rettiwt.tweet.search(searchParams);
 
-        // Handle both old and new Nitter response formats
-        const responseData = nitterResponse.data.data || nitterResponse.data;
-        const timeline = responseData.timeline || [];
-        const tweets = responseData.tweets || timeline;
-        const users = responseData.users || [];
+        // Transform Rettiwt tweets to v2 format
+        const tweets = searchResult.list || [];
+        const v2Tweets = tweets.slice(0, maxResults).map(tweet => transformRettiwtTweetToV2(tweet));
         
-        // Check if tweet.fields was requested
-        const tweetFields = query['tweet.fields']?.split(',') || [];
-        const includeAllFields = tweetFields.length > 0;
-        
-        // Transform tweets to v2 format
-        const v2Tweets = (Array.isArray(tweets) ? tweets : []).map(tweet => {
-          // Handle both formats
-          const tweetId = tweet.id || tweet.tweetId;
-          const text = tweet.text || tweet.fullText || '';
-          const userId = tweet.userId || tweet.user?.id || 'unknown';
-          const date = tweet.date || tweet.createdAt || new Date().toISOString();
-          
-          // Extract username from tweet data or user object
-          const username = tweet.user?.username || tweet.user?.screen_name || tweet.username || tweet.screen_name || null;
-          
-          // Extract profile image from tweet data or user object
-          const profileImageUrl = tweet.user?.profile_image_url || tweet.user?.profile_image_url_https || 
-                                 tweet.user?.profileImage || tweet.user?.userPic || tweet.user?.avatar || null;
-          
-          const v2Tweet = {
-            id: tweetId,
-            text: text,
-            created_at: new Date(date).toISOString(),
-            author_id: userId,
-            edit_history_tweet_ids: [tweetId],
-            public_metrics: {
-              retweet_count: tweet.stats?.retweets || tweet.retweets || tweet.retweetCount || 0,
-              reply_count: tweet.stats?.replies || tweet.replies || tweet.replyCount || 0,
-              like_count: tweet.stats?.likes || tweet.likes || tweet.likeCount || 0,
-              quote_count: tweet.stats?.quotes || tweet.quotes || tweet.quoteCount || 0,
-              impression_count: tweet.stats?.views || tweet.views || tweet.viewCount || 0
-            }
-          };
-          
-          // Add author_username directly to the tweet if available
-          if (username) {
-            v2Tweet.author_username = username;
-          }
-          
-          // Add author_profile_image directly to the tweet if available
-          if (profileImageUrl) {
-            v2Tweet.author_profile_image = profileImageUrl.startsWith('http') 
-              ? profileImageUrl 
-              : `https://pbs.twimg.com/${profileImageUrl.replace(/^\//, '')}`;
-          }
-          
-          // Add additional fields when requested
-          if (includeAllFields) {
-            // Add conversation_id
-            if (tweet.conversationId) {
-              v2Tweet.conversation_id = tweet.conversationId;
-            } else {
-              v2Tweet.conversation_id = tweetId; // Default to tweet ID for root tweets
-            }
-            
-            // Add language if available
-            if (tweet.lang) {
-              v2Tweet.lang = tweet.lang;
-            }
-            
-            // Add possibly_sensitive flag
-            if (tweet.sensitive !== undefined) {
-              v2Tweet.possibly_sensitive = tweet.sensitive;
-            }
-            
-            // Add reply info
-            if (tweet.replyTo || tweet.in_reply_to_user_id) {
-              v2Tweet.in_reply_to_user_id = tweet.replyTo || tweet.in_reply_to_user_id;
-            }
-            
-            // Add entities if available
-            if (tweet.hashtags || tweet.mentions || tweet.urls || tweet.entities) {
-              v2Tweet.entities = {};
-              
-              if (tweet.hashtags && tweet.hashtags.length > 0) {
-                v2Tweet.entities.hashtags = tweet.hashtags;
-              } else if (tweet.entities?.hashtags) {
-                v2Tweet.entities.hashtags = tweet.entities.hashtags;
-              }
-              
-              if (tweet.mentions && tweet.mentions.length > 0) {
-                v2Tweet.entities.mentions = tweet.mentions;
-              } else if (tweet.entities?.mentions) {
-                v2Tweet.entities.mentions = tweet.entities.mentions;
-              }
-              
-              if (tweet.urls && tweet.urls.length > 0) {
-                v2Tweet.entities.urls = tweet.urls;
-              } else if (tweet.entities?.urls) {
-                v2Tweet.entities.urls = tweet.entities.urls;
-              }
-            }
-            
-            // Add media attachments
-            if (tweet.media && tweet.media.length > 0) {
-              v2Tweet.attachments = {
-                media_keys: tweet.media.map(m => m.id || m.url)
-              };
-            }
-          }
-          
-          return v2Tweet;
-        });
-
-        // Build meta object in exact X API v2 format
-        const metaParams = {
-          result_count: v2Tweets.length
-        };
-        
-        if (v2Tweets.length > 0) {
-          metaParams.newest_id = v2Tweets[0].id;
-          metaParams.oldest_id = v2Tweets[v2Tweets.length - 1].id;
-        }
-        
-        // Check for pagination token in various locations
-        const cursor = nitterResponse.data.cursor || 
-                       responseData.pagination?.bottom || 
-                       responseData.pagination?.cursor ||
-                       responseData.cursor;
-        
-        if (cursor) {
-          metaParams.next_token = cursor;
-        }
-        
-        // Add previous_token if we received a pagination_token (means we're not on first page)
-        if (query.pagination_token) {
-          // For now, we can't generate a true previous token without state
-          // This is a limitation of the stateless proxy
-        }
-        
+        // Build response
         const response = {
           data: v2Tweets,
-          meta: buildMetaObject(metaParams)
-        };
-
-        // Build user map from tweets if we don't have separate user data
-        const userMap = new Map();
-        
-        // First, add users from the users array if available
-        if (users.length > 0) {
-          users.forEach(user => {
-            userMap.set(user.id, {
-              id: user.id,
-              username: user.username,
-              name: user.name,
-              created_at: user.joined ? new Date(user.joined).toISOString() : undefined,
-              protected: user.protected || false,
-              description: user.bio || '',
-              location: user.location || '',
-              url: user.website || '',
-              verified: user.verified || false,
-              profile_image_url: user.avatar ? (user.avatar.startsWith('http') ? user.avatar : `https://pbs.twimg.com/${user.avatar.replace(/^\//, '')}`) : null,
-              public_metrics: {
-                followers_count: user.followers || 0,
-                following_count: user.following || 0,
-                tweet_count: user.tweets || 0,
-                listed_count: 0
-              }
-            });
-          });
-        }
-        
-        // Then, extract user data from tweets themselves if not already in map
-        (Array.isArray(tweets) ? tweets : []).forEach(tweet => {
-          if (tweet.user && !userMap.has(tweet.user.id || tweet.userId)) {
-            const userId = tweet.user.id || tweet.userId || tweet.user?.id_str;
-            const profileImageUrl = tweet.user.profile_image_url || tweet.user.profile_image_url_https || 
-                                   tweet.user.profileImage || tweet.user.userPic || tweet.user.avatar;
-            
-            userMap.set(userId, {
-              id: userId,
-              username: tweet.user.username || tweet.user.screen_name || tweet.username,
-              name: tweet.user.name || tweet.user.fullName || tweet.user.fullname,
-              protected: tweet.user.protected || false,
-              description: tweet.user.description || tweet.user.bio || '',
-              verified: tweet.user.verified || false,
-              profile_image_url: profileImageUrl ? (profileImageUrl.startsWith('http') ? profileImageUrl : `https://pbs.twimg.com/${profileImageUrl.replace(/^\//, '')}`) : null,
-              public_metrics: {
-                followers_count: tweet.user.followers_count || tweet.user.followers || 0,
-                following_count: tweet.user.following_count || tweet.user.following || tweet.user.friends_count || 0,
-                tweet_count: tweet.user.statuses_count || tweet.user.tweets || 0,
-                listed_count: tweet.user.listed_count || 0
-              }
-            });
+          meta: {
+            result_count: v2Tweets.length
           }
-        });
+        };
         
-        // Add includes if we have user data
-        if (userMap.size > 0) {
-          response.includes = {
-            users: Array.from(userMap.values())
-          };
+        // Add pagination info if available
+        if (v2Tweets.length > 0) {
+          response.meta.newest_id = v2Tweets[0].id;
+          response.meta.oldest_id = v2Tweets[v2Tweets.length - 1].id;
         }
-
+        
+        // Check if expansions were requested
+        const expansions = query.expansions?.split(',') || [];
+        
+        // Add includes if author_id expansion was requested
+        if (expansions.includes('author_id') && tweets.length > 0) {
+          const users = new Map();
+          
+          tweets.slice(0, maxResults).forEach(tweet => {
+            if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
+              users.set(tweet.tweetBy.id, transformRettiwtUserToV2(tweet.tweetBy));
+            }
+          });
+          
+          if (users.size > 0) {
+            response.includes = {
+              users: Array.from(users.values())
+            };
+          }
+        }
+        
         return res.json(response);
       } catch (error) {
-        console.error('Nitter search error:', error.message);
+        console.error('Search error:', error.message);
         return res.json({
           data: [],
           meta: {
@@ -1798,19 +1630,6 @@ module.exports = async (req, res) => {
         });
       }
     }
-
-
-    // TRENDS ENDPOINTS
-
-    // GET /2/trends/place/:woeid
-    if (pathParts[0] === '2' && pathParts[1] === 'trends' && pathParts[2] === 'place') {
-      const woeid = pathParts[3] || '1';
-      
-      const response = await axios.get(
-        `${API_BASE}/1.1/trends/place.json`,
-        {
-          params: { id: woeid },
-          headers: {
             'Authorization': `Bearer ${BEARER_TOKEN}`,
             'x-guest-token': guestToken
           }
@@ -2010,7 +1829,12 @@ module.exports = async (req, res) => {
             const tweetId = tweet.id || tweet.tweetId;
             const text = tweet.text || tweet.fullText || '';
             const authorId = tweet.userId || tweet.user?.id || 'unknown';
-            const date = tweet.date || tweet.createdAt || new Date().toISOString();
+            
+            // Convert Unix timestamp if available (Nitter format), otherwise use other date formats
+            const dateValue = tweet.time ? new Date(tweet.time * 1000).toISOString() : 
+                             tweet.date ? new Date(tweet.date).toISOString() :
+                             tweet.createdAt ? new Date(tweet.createdAt).toISOString() :
+                             new Date().toISOString();
             
             // Extract username from tweet data or user object
             const username = tweet.user?.username || tweet.user?.screen_name || tweet.username || tweet.screen_name || null;
@@ -2022,7 +1846,7 @@ module.exports = async (req, res) => {
             const v2Tweet = {
               id: tweetId,
               text: text,
-              created_at: new Date(date).toISOString(),
+              created_at: dateValue,
               author_id: authorId,
               edit_history_tweet_ids: [tweetId],
               public_metrics: {

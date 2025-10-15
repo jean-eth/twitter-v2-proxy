@@ -12,7 +12,7 @@
   "dependencies": {
     "axios": "^1.6.0",
     "fastify": "^5.5.0",
-    "rettiwt-api": "^4.2.0"
+    "rettiwt-api": "^6.0.6"
   },
   "devDependencies": {
     "vercel": "^32.0.0"
