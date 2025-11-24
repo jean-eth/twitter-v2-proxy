@@ -1110,6 +1110,45 @@ function buildV2TweetFromV1(v1Tweet, { tweetFieldsParam, userFieldsParam, mediaC
   return { tweet: filteredTweet, author };
 }
 
+async function fetchUserByIdV2(userId, userFieldsParam) {
+  // Try Rettiwt
+  const fromRettiwt = await fetchRettiwtUserProfile(userId, userFieldsParam);
+  if (fromRettiwt && !Array.isArray(fromRettiwt)) {
+    return fromRettiwt;
+  }
+
+  // Fallback to v1.1 users/show with guest token
+  try {
+    const guestToken = await getGuestToken();
+    const response = await axios.get(
+      `${API_BASE}/1.1/users/show.json`,
+      {
+        params: {
+          user_id: userId,
+          include_entities: true
+        },
+        headers: {
+          'Authorization': `Bearer ${BEARER_TOKEN}`,
+          'x-guest-token': guestToken
+        },
+        timeout: 5000
+      }
+    );
+
+    if (response.data) {
+      const includeAllFields = Boolean(userFieldsParam);
+      return applyUserFieldFilter(
+        transformUserToV2(response.data, includeAllFields),
+        userFieldsParam
+      );
+    }
+  } catch (error) {
+    console.error('User v1 fallback failed:', error.message);
+  }
+
+  return null;
+}
+
 // Fetch author data using Twitter oEmbed API (no auth required)
 async function fetchAuthorFromOEmbed(tweetId) {
   try {
@@ -1516,6 +1555,15 @@ module.exports = async (req, res) => {
         parameter,
         value,
         resource_id: value
+      }]
+    });
+
+  const serviceUnavailable = (detail = 'Service unavailable', type = 'https://api.twitter.com/2/problems/service-unavailable') =>
+    res.status(503).json({
+      errors: [{
+        title: 'Service Unavailable',
+        detail,
+        type
       }]
     });
 
@@ -2222,7 +2270,7 @@ module.exports = async (req, res) => {
       const errorsList = [];
 
       for (const id of uniqueIds) {
-        const user = await fetchRettiwtUserProfile(id, userFieldsParam);
+        const user = await fetchUserByIdV2(id, userFieldsParam);
         if (user) {
           data.push(user);
         } else {
@@ -2251,56 +2299,12 @@ module.exports = async (req, res) => {
       const userId = pathParts[2];
       const userFieldsParam = query['user.fields'];
 
-      const user = await fetchRettiwtUserProfile(userId, userFieldsParam);
+      const user = await fetchUserByIdV2(userId, userFieldsParam);
       if (user) {
         return res.json({ data: user });
       }
 
-      // Rettiwt failed, attempt legacy fallback
-      try {
-        const guestToken = await getGuestToken();
-        const response = await axios.get(
-          `${API_BASE}/1.1/users/show.json`,
-          {
-            params: {
-              user_id: userId,
-              include_entities: true
-            },
-            headers: {
-              'Authorization': `Bearer ${BEARER_TOKEN}`,
-              'x-guest-token': guestToken
-            },
-            timeout: 5000
-          }
-        );
-
-        if (response.data) {
-          const userFields = query['user.fields']?.split(',') || [];
-          const includeAllFields = userFields.length > 0;
-
-          const fallbackUser = applyUserFieldFilter(
-            transformUserToV2(response.data, includeAllFields),
-            userFieldsParam
-          );
-          return res.json({
-            data: fallbackUser
-          });
-        }
-      } catch (error) {
-        console.error('User lookup fallback failed:', error.response?.data || error.message);
-      }
-
-      return res.status(404).json({
-        errors: [{
-          value: userId,
-          detail: 'Could not find user with referenced id',
-          title: 'Not Found Error',
-          type: 'https://api.twitter.com/2/problems/resource-not-found',
-          resource_type: 'user',
-          parameter: 'id',
-          resource_id: userId
-        }]
-      });
+      return resourceNotFound('user', userId, 'id');
     }
 
     // GET /2/users/by/username/:username/tweets - Check this BEFORE the profile endpoint
@@ -2722,13 +2726,7 @@ module.exports = async (req, res) => {
         if (users.length === 0) {
           const metrics = await fetchTweetMetrics(tweetId);
           if (!metrics || metrics.like_count > 0) {
-            return res.status(503).json({
-              errors: [{
-                message: 'Tweet likers unavailable',
-                detail: 'Upstream returned no liker data despite recorded likes',
-                code: 'tweet_likers_unavailable'
-              }]
-            });
+            return serviceUnavailable('Tweet likers unavailable');
           }
         }
 
@@ -2738,13 +2736,7 @@ module.exports = async (req, res) => {
         });
       } catch (error) {
         console.error('Tweet likers error:', error.message);
-        return res.status(503).json({
-          errors: [{
-            message: 'Tweet likers unavailable',
-            detail: error.message,
-            code: 'tweet_likers_unavailable'
-          }]
-        });
+        return serviceUnavailable('Tweet likers unavailable');
       }
     }
 
@@ -2792,13 +2784,7 @@ module.exports = async (req, res) => {
         if (users.length === 0) {
           const metrics = await fetchTweetMetrics(tweetId);
           if (!metrics || metrics.retweet_count > 0) {
-            return res.status(503).json({
-              errors: [{
-                message: 'Tweet retweeters unavailable',
-                detail: 'Upstream returned no retweeter data despite recorded retweets',
-                code: 'tweet_retweeters_unavailable'
-              }]
-            });
+            return serviceUnavailable('Tweet retweeters unavailable');
           }
         }
 
@@ -2808,13 +2794,7 @@ module.exports = async (req, res) => {
         });
       } catch (error) {
         console.error('Tweet retweeters error:', error.message);
-        return res.status(503).json({
-          errors: [{
-            message: 'Tweet retweeters unavailable',
-            detail: error.message,
-            code: 'tweet_retweeters_unavailable'
-          }]
-        });
+        return serviceUnavailable('Tweet retweeters unavailable');
       }
     }
 
@@ -2828,6 +2808,9 @@ module.exports = async (req, res) => {
       const tweetFieldsParam = query['tweet.fields'];
       const userFieldsParam = query['user.fields'];
       const expansions = query.expansions?.split(',') || [];
+      const mediaFieldsParam = query['media.fields'];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
 
       try {
         const searchResult = await rettiwt.tweet.search({ quoted: tweetId }, maxResults, fetchCursor);
@@ -2883,13 +2866,7 @@ module.exports = async (req, res) => {
         return res.json(responsePayload);
       } catch (error) {
         console.error('Quote tweets error:', error.message);
-        return res.status(503).json({
-          errors: [{
-            message: 'Quote tweets unavailable',
-            detail: error.message,
-            code: 'tweet_quotes_unavailable'
-          }]
-        });
+        return serviceUnavailable('Quote tweets unavailable');
       }
     }
 
@@ -3665,16 +3642,11 @@ module.exports = async (req, res) => {
       const mediaCollector = includeMediaExpansion ? new Map() : null;
 
       try {
-        const userProfile = await fetchRettiwtUserProfile(userId);
+        const userProfile = await fetchUserByIdV2(userId, userFieldsParam);
         const username = userProfile?.username;
 
         if (!username) {
-          return res.status(404).json({
-            errors: [{
-              message: 'User not found',
-              code: 'resource_not_found'
-            }]
-          });
+          return resourceNotFound('user', userId, 'id');
         }
 
         const searchResult = await rettiwt.tweet.search({ mentions: [username] }, maxResults, fetchCursor);
@@ -3746,66 +3718,10 @@ module.exports = async (req, res) => {
       const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
       
       try {
-        const bookmarks = await rettiwt.user.bookmarks();
-        
-        if (bookmarks && bookmarks.list) {
-          const tweetFieldsParam = query['tweet.fields'];
-          const userFieldsParam = query['user.fields'];
-          const mediaFieldsParam = query['media.fields'];
-          const expansions = query.expansions?.split(',') || [];
-          const includeMediaExpansion = expansions.includes('attachments.media_keys');
-          const mediaCollector = includeMediaExpansion ? new Map() : null;
-
-          const rawTweets = bookmarks.list.slice(0, maxResults);
-          const tweets = rawTweets
-            .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
-            .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
-          
-          const response = {
-            data: tweets,
-            meta: {
-              result_count: tweets.length
-            }
-          };
-          
-          if (expansions.includes('author_id') && rawTweets.length > 0) {
-            const users = new Map();
-            rawTweets.forEach(tweet => {
-              if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
-                const user = transformRettiwtUserToV2(tweet.tweetBy);
-                if (user) {
-                  users.set(user.id, applyUserFieldFilter(user, userFieldsParam));
-                }
-              }
-            });
-            
-            if (users.size > 0) {
-              response.includes = {
-                users: Array.from(users.values())
-              };
-            }
-          }
-
-          appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
-          
-          return res.json(response);
-        }
-        
-        return res.json({
-          data: [],
-          meta: {
-            result_count: 0
-          }
-        });
+        // Bookmarks are auth-only in official API
+        return authRequired('You are not allowed to access or use this endpoint with your environment');
       } catch (error) {
-        console.error('Bookmarks error:', error.message);
-        // Bookmarks require authentication
-        return res.status(403).json({
-          errors: [{
-            message: 'This endpoint requires user authentication',
-            code: 'authentication_required'
-          }]
-        });
+        return authRequired('You are not allowed to access or use this endpoint with your environment');
       }
     }
     
