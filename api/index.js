@@ -2922,7 +2922,7 @@ module.exports = async (req, res) => {
             userFieldsParam,
             mediaCollector
           });
-          if (mapped && mapped.tweet) {
+          if (mapped && mapped.tweet && mapped.tweet.text) {
             tweets.push(mapped.tweet);
             if (includeAuthorExpansion && mapped.author && mapped.author.id && !users.has(mapped.author.id)) {
               users.set(mapped.author.id, mapped.author);
@@ -3148,7 +3148,7 @@ module.exports = async (req, res) => {
             mediaCollector
           });
 
-          if (mapped && mapped.tweet) {
+          if (mapped && mapped.tweet && mapped.tweet.text) {
             const responsePayload = { data: mapped.tweet };
 
             if (includeAuthorExpansion && mapped.author) {
