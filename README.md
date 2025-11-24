@@ -1,165 +1,57 @@
-# Twitter v2 API Proxy (FREE)
+# Twitter v2 Proxy (guest-only)
 
-This Fastify server mimics Twitter's v2 API endpoints but uses guest tokens to fetch data from v1.1 endpoints for FREE.
+Free, read-only mimic of the Twitter/X v2 API built on guest tokens, Rettiwt, and Nitter/VX/FX fallbacks. It serves the core unauthenticated read surface (users, tweets, lists, geo) and explicitly returns `403` for official endpoints that require OAuth (counts/full-archive, bookmarks/likes, etc.).
 
-## Features
+## What it covers (read-only)
+- Users: `GET /2/users/:id`, `GET /2/users?ids`, `GET /2/users/by/username/:username`, `GET /2/users/by?usernames`, `GET /2/users/search`, `GET /2/users/:id/followers`, `GET /2/users/:id/following`, `GET /2/users/:source_id/following/:target_id`, `GET /2/users/:id/list_memberships`, `GET /2/users/:id/owned_lists`, `GET /2/users/:id/followed_lists`, `GET /2/users/:id/tweets`, `GET /2/users/by/username/:username/tweets`, `GET /2/users/:id/mentions`
+- Tweets: `GET /2/tweets/:id`, `GET /2/tweets?ids`, `GET /2/tweets/:id/liking_users`, `GET /2/tweets/:id/retweeted_by`, `GET /2/tweets/:id/quote_tweets`, `GET /2/tweets/search/recent`
+- Lists: `GET /2/lists/:id`, `GET /2/lists/:id/members`, `GET /2/lists/:id/followers`, `GET /2/lists/:id/tweets`
+- Geo/System: `GET /2/geo/search`, `GET /2/system/init-tokens`, `/health`, `/`
 
-- ✅ Exact v2 API response format
-- ✅ No authentication required
-- ✅ No API keys needed
-- ✅ No cost ($0 vs $100-42,000/month)
-- ✅ Pagination support
-- ✅ Error handling matching v2 format
+## What it does **not** serve (returns 403)
+- Tweet counts: `GET /2/tweets/counts/recent|all`
+- Full-archive search: `GET /2/tweets/search/all`
+- Any other OAuth-only endpoints (likes/bookmarks/blocks/mutes/write surfaces) remain unsupported.
 
-## Installation
+## Data sources
+- **Rettiwt**: primary for users, timelines, tweet details, likers/retweeters, lists.
+- **Nitter**: fallback for profiles, timelines, user search, and date-filtered recent search.
+- **VX/FX Twitter**: fallback for tweet details when Rettiwt/Nitter miss.
+- **Guest tokens**: pooled to stay within v1.1 guest limits where needed.
 
-```bash
+## Environment
+- `BEARER_TOKEN`: v1.1 bearer for guest activation (default baked in).
+- `RETTIWT_API_KEY`: API key for Rettiwt (default baked in).
+- `NITTER_API`: Nitter JSON endpoint (default: `https://nitter.r2d2.to/api`).
+- `SNAPLYTICS_API`: Media helper base (default: `https://twittermedia.b-cdn.net/viewer/`).
+
+## Run locally
+```sh
 npm install
-npm start
+npm run dev   # fastify server on PORT (default 3003)
+```
+The Fastify adapter proxies everything to `api/index.js` so local and Vercel behave the same.
+
+## Deploy (Vercel)
+- The repo is wired with `vercel.json`; production deploy: `npm run deploy` or `vercel --prod`.
+- Routes: `/` and `/2/*` (plus `/health`) map to `api/index.js`.
+
+## Usage examples
+```sh
+# User by username
+curl "https://twitter-v2-proxy.vercel.app/2/users/by/username/elonmusk?user.fields=public_metrics"
+
+# Single tweet with author/media expansions
+curl "https://twitter-v2-proxy.vercel.app/2/tweets/1848812205222023367?expansions=author_id,attachments.media_keys&media.fields=type,url"
+
+# Recent search
+curl "https://twitter-v2-proxy.vercel.app/2/tweets/search/recent?query=OpenAI&max_results=5&tweet.fields=public_metrics"
+
+# Counts/full-archive (returns 403 by design)
+curl -i "https://twitter-v2-proxy.vercel.app/2/tweets/counts/recent?query=OpenAI"
 ```
 
-## Endpoints
-
-### 1. Get User Followers
-```bash
-GET http://localhost:3000/2/users/:id/followers
-
-# Example: Get Elon Musk's followers
-curl "http://localhost:3000/2/users/44196397/followers?max_results=100"
-```
-
-### 2. Get User Following
-```bash
-GET http://localhost:3000/2/users/:id/following
-
-# Example: Get who Elon follows
-curl "http://localhost:3000/2/users/44196397/following?max_results=100"
-```
-
-### 3. Get List Followers
-```bash
-GET http://localhost:3000/2/lists/:id/followers
-
-# Example: Get list subscribers
-curl "http://localhost:3000/2/lists/84839422/followers"
-```
-
-### 4. Get User by Username
-```bash
-GET http://localhost:3000/2/users/by/username/:username
-
-# Example
-curl "http://localhost:3000/2/users/by/username/elonmusk"
-```
-
-### 5. Search Recent Tweets (Limited)
-```bash
-GET http://localhost:3000/2/tweets/search/recent
-
-# Note: Returns trending topics instead (search blocked for guest tokens)
-curl "http://localhost:3000/2/tweets/search/recent"
-```
-
-## Query Parameters
-
-- `max_results`: Number of results (1-200, default: 100)
-- `pagination_token`: Token for next page
-- `user.fields`: Additional fields to include
-
-## Example Response (v2 Format)
-
-```json
-{
-  "data": [
-    {
-      "id": "2244994945",
-      "username": "TwitterDev",
-      "name": "Twitter Dev",
-      "created_at": "2013-12-14T04:35:55Z",
-      "protected": false,
-      "description": "The voice of the X Dev team",
-      "verified": true,
-      "profile_image_url": "https://pbs.twimg.com/...",
-      "public_metrics": {
-        "followers_count": 558853,
-        "following_count": 2039,
-        "tweet_count": 4131,
-        "listed_count": 1703
-      }
-    }
-  ],
-  "meta": {
-    "result_count": 100,
-    "next_token": "MTIzNDU2Nzg5MA==",
-    "previous_token": "OTg3NjU0MzIx"
-  },
-  "includes": {
-    "tweets": [...],
-    "media": [...]
-  }
-}
-```
-
-## Pagination
-
-Use the `next_token` from the response:
-
-```bash
-# First page
-curl "http://localhost:3000/2/users/44196397/followers"
-
-# Next page
-curl "http://localhost:3000/2/users/44196397/followers?pagination_token=MTIzNDU2Nzg5MA=="
-```
-
-## Error Handling
-
-Errors match Twitter v2 format:
-
-```json
-{
-  "errors": [
-    {
-      "detail": "The specified list does not exist",
-      "status": 404,
-      "title": "Not Found",
-      "type": "https://api.twitter.com/2/problems/resource-not-found"
-    }
-  ]
-}
-```
-
-## Comparison with Official API
-
-| Feature | Official v2 API | This Proxy |
-|---------|----------------|------------|
-| Authentication | OAuth required | None |
-| Cost | $100-42,000/mo | FREE |
-| Rate Limits | Varies by tier | 15 req/15min per token |
-| Data Format | v2 JSON | v2 JSON (identical) |
-| Setup Time | Days/Weeks | 1 minute |
-
-## How It Works
-
-1. Server gets a guest token from Twitter (no auth needed)
-2. Requests data from v1.1 endpoints using guest token
-3. Transforms v1.1 response to match v2 format exactly
-4. Returns data in v2 structure
-
-## Limitations
-
-- Search endpoints don't work (returns trends instead)
-- Rate limited to 15 requests/15min per token
-- Some v2 fields may be missing if not in v1.1 response
-
-## Production Use
-
-For production, consider:
-1. Implementing token rotation
-2. Adding Redis cache
-3. Using multiple guest tokens
-4. Adding request queuing
-
-## Legal Notice
-
-This is for educational purposes. Using this to bypass Twitter's API pricing may violate their Terms of Service.
+## Caveats
+- Guest-only: write surfaces and protected content are not available.
+- Counts/full-archive need real OAuth (elevated/academic); we return 403 to mirror the official API.
+- Upstream fallbacks (Nitter/VX/FX) can occasionally miss media/entities; retries may help.

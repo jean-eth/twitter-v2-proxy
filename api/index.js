@@ -7,6 +7,43 @@ const API_BASE = 'https://api.twitter.com';
 const NITTER_API = process.env.NITTER_API || 'https://nitter.r2d2.to/api';
 const SNAPLYTICS_API = process.env.SNAPLYTICS_API || 'https://twittermedia.b-cdn.net/viewer/';
 
+const ENDPOINT_CATALOG = Object.freeze({
+  users: [
+    'GET /2/users/:id',
+    'GET /2/users/:id/followers',
+    'GET /2/users/:id/following',
+    'GET /2/users/by/username/:username',
+    'GET /2/users/search',
+    'GET /2/users/:id/list_memberships',
+    'GET /2/users/:id/owned_lists',
+    'GET /2/users/:id/followed_lists',
+    'GET /2/users/:source_id/following/:target_id'
+  ],
+  tweets: [
+    'GET /2/tweets/:id',
+    'GET /2/tweets/search/recent',
+    'GET /2/users/:id/tweets',
+    'GET /2/users/by/username/:username/tweets',
+    'GET /2/tweets/:id/liking_users',
+    'GET /2/tweets/:id/retweeted_by'
+  ],
+  lists: [
+    'GET /2/lists/:id',
+    'GET /2/lists/:id/members',
+    'GET /2/lists/:id/followers',
+    'GET /2/lists/:id/tweets'
+  ],
+  geo: [
+    'GET /2/geo/search'
+  ],
+  other: [
+    'GET /2/tweets/search/recent'
+  ],
+  system: [
+    'GET /2/system/init-tokens'
+  ]
+});
+
 // Initialize Rettiwt API with auth token  
 const RETTIWT_API_KEY = process.env.RETTIWT_API_KEY || 'a2R0PTAzbVYwbWJYMzdsbnZnS29aemp2WVZzVlhEbEVUM3pjQzZ0RGJrYkY7YXV0aF90b2tlbj0xMDkzN2FkY2I1M2M0ZDU2MmMyN2U0N2ZmNGMxNjlkZGIwODMyZTU4O2N0MD03MTkzNDRkYzdmODgzODBhYWFlYTE2MDAwOTdmYWJhZGUyZTJmNjA5MjE2OTJjNGUxZjE0ZjUzOTE4NDZkODY1MWE1YzU3ZGNiZmU1MjM4ZDQ2MjU1ZDg3MzQzN2Q3MDlhOTQwZDQ1ZjU0YjhmMDU0NGRlOWMzOGM3YjI3NzdhZjk3NWNjNzM2NTczMTIzN2E2YWNkNzU3NTk5MTU4NDQ5O3R3aWQ9dSUzRDE5NTc5NjkwNDA0MjI2ODY3MjA7';
 const rettiwt = new Rettiwt({ apiKey: RETTIWT_API_KEY });
@@ -154,32 +191,810 @@ async function getGuestToken() {
 // Transform Rettiwt user to Twitter v2 format
 function transformRettiwtUserToV2(rettiwtUser) {
   if (!rettiwtUser) return null;
-  
-  return {
-    id: rettiwtUser.id || rettiwtUser.restId,
-    username: rettiwtUser.userName,
-    name: rettiwtUser.fullName,
-    created_at: rettiwtUser.createdAt ? new Date(rettiwtUser.createdAt).toISOString() : new Date().toISOString(),
-    protected: rettiwtUser.isProtected || false,
-    description: rettiwtUser.description || '',
-    location: rettiwtUser.location || '',
-    url: rettiwtUser.url || '',
-    verified: rettiwtUser.isVerified || false,
-    profile_image_url: rettiwtUser.profileImage || null,
-    profile_banner_url: rettiwtUser.profileBanner || null,
+
+  const raw = rettiwtUser.raw ?? {};
+  const legacy = raw.legacy ?? {};
+  const entities = legacy.entities ?? {};
+
+  const createdAt = rettiwtUser.createdAt
+    ? new Date(rettiwtUser.createdAt).toISOString()
+    : new Date().toISOString();
+
+  const urlEntity = Array.isArray(entities.url?.urls) ? entities.url.urls[0] : null;
+
+  const user = {
+    id: rettiwtUser.id || legacy.rest_id || rettiwtUser.restId,
+    username: rettiwtUser.userName || legacy.screen_name,
+    name: rettiwtUser.fullName || legacy.name,
+    created_at: createdAt,
+    protected: legacy.protected ?? false,
+    description: rettiwtUser.description ?? legacy.description ?? '',
+    location: rettiwtUser.location ?? legacy.location ?? '',
+    url: urlEntity?.expanded_url ?? legacy.url ?? null,
+    verified: rettiwtUser.isVerified ?? legacy.verified ?? false,
+    profile_image_url: rettiwtUser.profileImage ?? legacy.profile_image_url_https ?? null,
+    profile_banner_url: rettiwtUser.profileBanner ?? legacy.profile_banner_url ?? null,
     public_metrics: {
-      followers_count: rettiwtUser.followersCount || 0,
-      following_count: rettiwtUser.followingsCount || 0,
-      tweet_count: rettiwtUser.statusesCount || 0,
-      listed_count: rettiwtUser.listedCount || 0,
-      like_count: rettiwtUser.favoritesCount || 0
+      followers_count: rettiwtUser.followersCount ?? legacy.followers_count ?? 0,
+      following_count: rettiwtUser.followingsCount ?? legacy.friends_count ?? 0,
+      tweet_count: rettiwtUser.statusesCount ?? legacy.statuses_count ?? 0,
+      listed_count: legacy.listed_count ?? 0,
+      like_count: rettiwtUser.likeCount ?? legacy.favourites_count ?? 0
+    }
+  };
+
+  if (legacy.verified_type) {
+    user.verified_type = legacy.verified_type;
+  }
+
+  if (rettiwtUser.pinnedTweet) {
+    user.pinned_tweet_id = rettiwtUser.pinnedTweet;
+  } else if (Array.isArray(legacy.pinned_tweet_ids_str) && legacy.pinned_tweet_ids_str.length > 0) {
+    user.pinned_tweet_id = legacy.pinned_tweet_ids_str[0];
+  }
+
+  if (entities.description) {
+    user.entities = {
+      description: entities.description
+    };
+  }
+
+  if (entities.url) {
+    user.entities = {
+      ...(user.entities || {}),
+      url: entities.url
+    };
+  }
+
+  if (legacy.withheld_in_countries && legacy.withheld_in_countries.length > 0) {
+    user.withheld = {
+      scope: legacy.withheld_scope || 'user',
+      country_codes: legacy.withheld_in_countries
+    };
+  }
+
+  return user;
+}
+
+function stripHtml(input) {
+  if (!input) return '';
+  return input.replace(/<[^>]+>/g, '');
+}
+
+function prependMediaUrl(path) {
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    return path;
+  }
+  return `https://pbs.twimg.com/${path}`;
+}
+
+function transformNitterUserToV2(nitterUser) {
+  if (!nitterUser) return null;
+
+  const joinDate = Number(nitterUser.joinDate);
+  const createdAt = Number.isFinite(joinDate) ? new Date(joinDate * 1000).toISOString() : new Date().toISOString();
+
+  const publicMetrics = {
+    followers_count: nitterUser.followers || 0,
+    following_count: nitterUser.following || 0,
+    tweet_count: nitterUser.tweets || 0,
+    listed_count: 0,
+    like_count: nitterUser.likes || 0
+  };
+
+  const user = {
+    id: nitterUser.id ? nitterUser.id.toString() : undefined,
+    username: nitterUser.username,
+    name: nitterUser.fullname || nitterUser.username,
+    created_at: createdAt,
+    protected: Boolean(nitterUser.protected),
+    description: stripHtml(nitterUser.bio || ''),
+    location: nitterUser.location || '',
+    url: nitterUser.website || '',
+    verified: Boolean(nitterUser.verifiedType && nitterUser.verifiedType !== 'None'),
+    profile_image_url: prependMediaUrl(nitterUser.userPic),
+    profile_banner_url: prependMediaUrl(nitterUser.banner),
+    public_metrics: publicMetrics
+  };
+
+  if (nitterUser.verifiedType && nitterUser.verifiedType !== 'None') {
+    user.verified_type = nitterUser.verifiedType.toLowerCase();
+  }
+
+  if (nitterUser.pinnedTweet && nitterUser.pinnedTweet !== 0) {
+    user.pinned_tweet_id = nitterUser.pinnedTweet.toString();
+  }
+
+  return user;
+}
+
+async function fetchRettiwtUserProfile(identifier, fieldsParam) {
+  if (!identifier && identifier !== 0) {
+    return null;
+  }
+
+  try {
+    const target = String(identifier).trim();
+    const detail = await rettiwt.user.details(target);
+    const user = transformRettiwtUserToV2(detail);
+    return applyUserFieldFilter(user, fieldsParam);
+  } catch (error) {
+    console.error('Rettiwt user details error:', error.message);
+    return null;
+  }
+}
+
+async function fetchUserProfile(identifier, userFieldsParam) {
+  const userFromRettiwt = await fetchRettiwtUserProfile(identifier, userFieldsParam);
+  if (userFromRettiwt && !Array.isArray(userFromRettiwt)) {
+    return userFromRettiwt;
+  }
+
+  const candidate = typeof identifier === 'string' ? identifier.trim() : String(identifier);
+  if (/^\d+$/.test(candidate)) {
+    return null;
+  }
+
+  const nitterUser = await fetchNitterUser(candidate.replace(/^@/, ''));
+  return applyUserFieldFilter(nitterUser, userFieldsParam);
+}
+
+const DEFAULT_USER_FIELDS = Object.freeze([
+  'id',
+  'name',
+  'username',
+  'created_at',
+  'description',
+  'entities',
+  'location',
+  'pinned_tweet_id',
+  'profile_image_url',
+  'protected',
+  'public_metrics',
+  'url',
+  'verified',
+  'verified_type'
+]);
+
+const DEFAULT_LIST_FIELDS = Object.freeze([
+  'id',
+  'name',
+  'description',
+  'owner_id',
+  'created_at',
+  'private',
+  'follower_count',
+  'member_count'
+]);
+
+const DEFAULT_TWEET_FIELDS = Object.freeze([
+  'id',
+  'text',
+  'edit_history_tweet_ids'
+]);
+
+function normalizeFieldList(value, defaults) {
+  if (!value) {
+    return new Set(defaults);
+  }
+
+  if (Array.isArray(value)) {
+    value = value.join(',');
+  }
+
+  return new Set(
+    String(value)
+      .split(',')
+      .map(field => field.trim())
+      .filter(Boolean)
+  );
+}
+
+function applyUserFieldFilter(user, fieldsParam, extraAlways = []) {
+  if (!user) return user;
+
+  const fieldSet = normalizeFieldList(fieldsParam, DEFAULT_USER_FIELDS);
+  ['id', 'name', 'username', ...extraAlways].forEach(f => fieldSet.add(f));
+
+  const filtered = {};
+  for (const field of fieldSet) {
+    if (user[field] !== undefined) {
+      filtered[field] = user[field];
+    }
+  }
+
+  return filtered;
+}
+
+function applyTweetFieldFilter(tweet, fieldsParam, extraAlways = []) {
+  if (!tweet) return tweet;
+
+  const fieldSet = normalizeFieldList(fieldsParam, DEFAULT_TWEET_FIELDS);
+  ['id', 'text', 'edit_history_tweet_ids', ...extraAlways].forEach(f => fieldSet.add(f));
+
+  const filtered = {};
+  for (const field of fieldSet) {
+    if (tweet[field] !== undefined) {
+      filtered[field] = tweet[field];
+    }
+  }
+
+  return filtered;
+}
+
+function applyListFieldFilter(list, fieldsParam, extraAlways = []) {
+  if (!list) return list;
+
+  const fieldSet = normalizeFieldList(fieldsParam, DEFAULT_LIST_FIELDS);
+  ['id', 'name', ...extraAlways].forEach(f => fieldSet.add(f));
+
+  const filtered = {};
+  for (const field of fieldSet) {
+    if (list[field] !== undefined) {
+      filtered[field] = list[field];
+    }
+  }
+
+  return filtered;
+}
+
+const DEFAULT_MEDIA_FIELDS = Object.freeze([
+  'media_key',
+  'type'
+]);
+
+function resolveMediaKey(media) {
+  if (!media) return undefined;
+  const candidates = [
+    media.media_key,
+    media.mediaKey,
+    media.media_id,
+    media.mediaId,
+    media.media_id_string,
+    media.mediaIdString,
+    media.id_str,
+    media.id,
+    media.key,
+    media.url,
+    media.src,
+    media.path,
+    media.asset_id,
+    media.assetId
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === undefined || candidate === null) continue;
+    const key = String(candidate).trim();
+    if (key.length > 0) {
+      return key;
+    }
+  }
+
+  return undefined;
+}
+
+function mergeDefinedProperties(base, update) {
+  if (!base) return update;
+  if (!update) return base;
+
+  const merged = { ...base };
+  for (const [key, value] of Object.entries(update)) {
+    if (value !== undefined && value !== null) {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function transformMediaEntityToV2(media) {
+  if (!media) return null;
+
+  if (typeof media === 'string') {
+    media = { url: media };
+  }
+
+  const mediaKey = resolveMediaKey(media);
+  if (!mediaKey) return null;
+
+  const inferredType =
+    media.type ||
+    media.media_type ||
+    media.mediaCategory ||
+    (Array.isArray(media.variants) && media.variants.length > 0 ? 'video' : undefined) ||
+    (media.duration_ms || media.durationMs || media.duration ? 'video' : undefined) ||
+    (media.preview_image_url || media.previewUrl ? 'video' : undefined) ||
+    undefined;
+
+  const v2Media = {
+    media_key: mediaKey,
+    type: (inferredType || '').toLowerCase() || 'photo'
+  };
+
+  const urlCandidate =
+    media.url ||
+    media.media_url_https ||
+    media.media_url ||
+    media.full_url ||
+    media.src ||
+    media.source ||
+    media.display_url;
+
+  if (urlCandidate) {
+    v2Media.url = prependMediaUrl(urlCandidate);
+  }
+
+  const previewCandidate =
+    media.preview_image_url ||
+    media.previewUrl ||
+    media.thumbnail_url ||
+    media.poster ||
+    media.thumbnail;
+
+  if (previewCandidate) {
+    v2Media.preview_image_url = prependMediaUrl(previewCandidate);
+  }
+
+  const height =
+    media.height ??
+    media.original_info?.height ??
+    media.sizes?.large?.h ??
+    media.sizes?.medium?.h;
+
+  const width =
+    media.width ??
+    media.original_info?.width ??
+    media.sizes?.large?.w ??
+    media.sizes?.medium?.w;
+
+  if (Number.isFinite(height)) {
+    v2Media.height = height;
+  }
+
+  if (Number.isFinite(width)) {
+    v2Media.width = width;
+  }
+
+  const duration =
+    media.duration_ms ??
+    media.durationMs ??
+    media.duration ??
+    media.video_info?.duration_millis;
+
+  if (Number.isFinite(duration)) {
+    v2Media.duration_ms = duration;
+  }
+
+  const altText = media.alt_text || media.altText || media.ext_alt_text;
+  if (altText) {
+    v2Media.alt_text = altText;
+  }
+
+  const variantsSource =
+    media.variants ||
+    media.video_info?.variants ||
+    media.videoVariants ||
+    media.video_versions;
+
+  if (Array.isArray(variantsSource) && variantsSource.length > 0) {
+    v2Media.variants = variantsSource
+      .map(variant => {
+        if (!variant) return null;
+        const contentType = variant.content_type || variant.contentType || variant.type;
+        const url = variant.url || variant.src || variant.location;
+        if (!contentType && !url) {
+          return null;
+        }
+        const bitRate = variant.bit_rate ?? variant.bitRate ?? variant.bitrate;
+        const variantObj = {};
+        if (Number.isFinite(bitRate)) {
+          variantObj.bit_rate = bitRate;
+        }
+        if (contentType) {
+          variantObj.content_type = contentType;
+        }
+        if (url) {
+          variantObj.url = prependMediaUrl(url);
+        }
+        return Object.keys(variantObj).length > 0 ? variantObj : null;
+      })
+      .filter(Boolean);
+
+    if (v2Media.variants.length === 0) {
+      delete v2Media.variants;
+    }
+  }
+
+  if (media.additional_media_info) {
+    v2Media.additional_info = media.additional_media_info;
+  } else if (media.additionalInfo) {
+    v2Media.additional_info = media.additionalInfo;
+  }
+
+  return v2Media;
+}
+
+function collectMediaEntities(mediaSource, collector) {
+  if (!collector || !mediaSource) return;
+
+  let items = [];
+
+  if (Array.isArray(mediaSource)) {
+    items = mediaSource;
+  } else if (typeof mediaSource === 'object') {
+    const candidateArrays = [
+      mediaSource.all,
+      mediaSource.photos,
+      mediaSource.videos,
+      mediaSource.video,
+      mediaSource.gifs,
+      mediaSource.gif,
+      mediaSource.items,
+      mediaSource.media
+    ];
+
+    candidateArrays.forEach(arr => {
+      if (Array.isArray(arr)) {
+        items.push(...arr);
+      }
+    });
+
+    for (const value of Object.values(mediaSource)) {
+      if (Array.isArray(value)) {
+        items.push(...value);
+      }
+    }
+
+    if (items.length === 0) {
+      items = [mediaSource];
+    }
+  } else {
+    items = [mediaSource];
+  }
+
+  for (const media of items) {
+    const v2Media = transformMediaEntityToV2(media);
+    if (!v2Media || !v2Media.media_key) continue;
+    const existing = collector.get(v2Media.media_key);
+    collector.set(v2Media.media_key, mergeDefinedProperties(existing, v2Media));
+  }
+}
+
+function applyMediaFieldFilter(media, fieldsParam, extraAlways = []) {
+  if (!media) return media;
+
+  const fieldSet = normalizeFieldList(fieldsParam, DEFAULT_MEDIA_FIELDS);
+  ['media_key', 'type', ...extraAlways].forEach(f => fieldSet.add(f));
+
+  const filtered = {};
+  for (const field of fieldSet) {
+    if (media[field] !== undefined) {
+      filtered[field] = media[field];
+    }
+  }
+  return filtered;
+}
+
+function buildMediaIncludes(mediaCollector, mediaFieldsParam) {
+  if (!mediaCollector || mediaCollector.size === 0) {
+    return undefined;
+  }
+
+  const mediaList = Array.from(mediaCollector.values())
+    .map(media => applyMediaFieldFilter(media, mediaFieldsParam))
+    .filter(Boolean);
+
+  return mediaList.length > 0 ? mediaList : undefined;
+}
+
+function appendMediaIncludes(target, mediaCollector, mediaFieldsParam) {
+  if (!target) return target;
+  const mediaIncludes = buildMediaIncludes(mediaCollector, mediaFieldsParam);
+  if (!mediaIncludes) return target;
+
+  if (!target.includes) {
+    target.includes = {};
+  }
+
+  target.includes.media = mediaIncludes;
+  return target;
+}
+
+function transformTypeaheadUserToV2(typeaheadUser) {
+  if (!typeaheadUser) return null;
+
+  const createdAt = typeaheadUser.created_at
+    ? new Date(typeaheadUser.created_at).toISOString()
+    : new Date().toISOString();
+
+  return {
+    id: typeaheadUser.id_str || typeaheadUser.id?.toString(),
+    username: typeaheadUser.screen_name,
+    name: typeaheadUser.name,
+    created_at: createdAt,
+    protected: Boolean(typeaheadUser.protected),
+    description: typeaheadUser.description || '',
+    location: typeaheadUser.location || '',
+    url: typeaheadUser.url || '',
+    verified: Boolean(typeaheadUser.verified),
+    profile_image_url: typeaheadUser.profile_image_url_https || typeaheadUser.profile_image_url,
+    public_metrics: {
+      followers_count: Number(typeaheadUser.followers_count) || 0,
+      following_count: Number(typeaheadUser.friends_count) || 0,
+      tweet_count: Number(typeaheadUser.statuses_count) || 0,
+      listed_count: Number(typeaheadUser.listed_count) || 0,
+      like_count: Number(typeaheadUser.favourites_count) || 0
     }
   };
 }
 
+function transformListToV2(listData) {
+  if (!listData) return null;
+
+  const createdAt = listData.created_at ? new Date(listData.created_at).toISOString() : new Date().toISOString();
+
+  const v2List = {
+    id: listData.id_str || listData.id?.toString(),
+    name: listData.name,
+    description: listData.description || '',
+    created_at: createdAt,
+    private: listData.mode === 'private',
+    owner_id: listData.user?.id_str || listData.user?.id?.toString() || undefined,
+    follower_count: listData.subscriber_count || 0,
+    member_count: listData.member_count || 0,
+    slug: listData.slug,
+    url: listData.uri ? `https://twitter.com${listData.uri}` : undefined
+  };
+
+  if (listData.full_name) {
+    v2List.full_name = listData.full_name;
+  }
+
+  if (listData.entities?.description?.urls?.length) {
+    v2List.description_urls = listData.entities.description.urls.map(url => ({
+      url: url.url,
+      expanded_url: url.expanded_url,
+      display_url: url.display_url
+    }));
+  }
+
+  return v2List;
+}
+
+async function fetchTwitterV1(path, params = {}, timeout = 5000) {
+  const guestToken = await getGuestToken();
+  const response = await axios.get(
+    `${API_BASE}/1.1/${path}`,
+    {
+      params,
+      headers: {
+        'Authorization': `Bearer ${BEARER_TOKEN}`,
+        'x-guest-token': guestToken
+      },
+      timeout
+    }
+  );
+  return response.data;
+}
+
+function getFirstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return undefined;
+}
+
+async function fetchTweetMetrics(tweetId) {
+  try {
+    const response = await axios.get(
+      `https://api.fxtwitter.com/Twitter/status/${tweetId}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0'
+        },
+        timeout: 5000
+      }
+    );
+
+    const tweet = response.data?.tweet;
+    if (!tweet) return null;
+
+    const author = tweet.author || {};
+    const publicMetricsSource =
+      tweet.public_metrics ||
+      tweet.publicMetrics ||
+      tweet.stats ||
+      tweet.legacy?.public_metrics ||
+      tweet.original_tweet?.public_metrics ||
+      {};
+
+    const likeCount = getFirstFiniteNumber(
+      publicMetricsSource.like_count,
+      publicMetricsSource.favorite_count,
+      tweet.likes,
+      tweet.like_count,
+      tweet.favorite_count,
+      tweet.stats?.likes,
+      tweet.legacy?.favorite_count
+    );
+
+    const retweetCount = getFirstFiniteNumber(
+      publicMetricsSource.retweet_count,
+      publicMetricsSource.repost_count,
+      tweet.retweets,
+      tweet.retweet_count,
+      tweet.reposts,
+      tweet.stats?.retweets
+    );
+
+    const replyCount = getFirstFiniteNumber(
+      publicMetricsSource.reply_count,
+      tweet.replies,
+      tweet.reply_count,
+      tweet.conversation_count,
+      tweet.stats?.replies
+    );
+
+    const quoteCount = getFirstFiniteNumber(
+      publicMetricsSource.quote_count,
+      tweet.quotes,
+      tweet.quote_count,
+      tweet.stats?.quotes
+    );
+
+    const bookmarkCount = getFirstFiniteNumber(
+      publicMetricsSource.bookmark_count,
+      tweet.bookmarks,
+      tweet.bookmark_count,
+      tweet.stats?.bookmarks
+    );
+
+    const impressionCount = getFirstFiniteNumber(
+      publicMetricsSource.impression_count,
+      tweet.impression_count,
+      tweet.impressionCount,
+      tweet.stats?.impressions,
+      tweet.views,
+      tweet.view_count
+    );
+
+    const viewCount = getFirstFiniteNumber(
+      publicMetricsSource.view_count,
+      tweet.view_count,
+      tweet.views,
+      tweet.stats?.views
+    );
+
+    const publicMetrics = {
+      like_count: likeCount ?? 0,
+      retweet_count: retweetCount ?? 0,
+      reply_count: replyCount ?? 0,
+      quote_count: quoteCount ?? 0
+    };
+
+    if (bookmarkCount !== undefined) {
+      publicMetrics.bookmark_count = bookmarkCount;
+    }
+
+    if (viewCount !== undefined) {
+      publicMetrics.view_count = viewCount;
+    }
+
+    if (impressionCount !== undefined) {
+      publicMetrics.impression_count = impressionCount;
+    } else if (viewCount !== undefined) {
+      publicMetrics.impression_count = viewCount;
+    }
+
+    return {
+      ...publicMetrics,
+      username: author.screen_name || author.username || null,
+      public_metrics: publicMetrics
+    };
+  } catch (error) {
+    console.error('Tweet metrics fetch error:', error.message);
+    return null;
+  }
+}
+
+async function fetchNitterUser(username) {
+  try {
+    const response = await axios.get(
+      `${NITTER_API}/${encodeURIComponent(username)}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },
+        timeout: 8000
+      }
+    );
+
+    const data = response.data?.data;
+    if (!data) {
+      return null;
+    }
+
+    const userData = data.user || (Array.isArray(data.timeline) && data.timeline.length > 0 ? data.timeline[0].user : null);
+    if (!userData) {
+      return null;
+    }
+
+    const user = transformNitterUserToV2(userData);
+    if (!user) {
+      return null;
+    }
+
+    return user;
+  } catch (error) {
+    console.error('Nitter user fetch error:', error.message);
+    return null;
+  }
+}
+
+function parsePaginationToken(token) {
+  if (!token) {
+    return { cursor: undefined, offset: 0 };
+  }
+
+  try {
+    const raw = Buffer.from(token, 'base64').toString('utf8');
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          cursor: parsed.cursor === null ? undefined : parsed.cursor,
+          offset: Number(parsed.offset) || 0
+        };
+      }
+    } catch (_) {
+      // Not JSON, treat the decoded value as the raw cursor
+      return {
+        cursor: raw || undefined,
+        offset: 0
+      };
+    }
+  } catch (_) {
+    // Token was not base64 encoded, treat as raw cursor
+    return {
+      cursor: token,
+      offset: 0
+    };
+  }
+
+  return { cursor: undefined, offset: 0 };
+}
+
+function encodePaginationToken(cursor, offset = 0) {
+  const normalizedCursor = cursor === undefined ? null : cursor;
+  if (normalizedCursor === null && (!offset || offset === 0)) {
+    return undefined;
+  }
+
+  const payload = {
+    cursor: normalizedCursor,
+    offset: offset || 0
+  };
+
+  try {
+    return Buffer.from(JSON.stringify(payload)).toString('base64');
+  } catch (_) {
+    return undefined;
+  }
+}
+
 // Transform Rettiwt tweet to Twitter v2 format
-function transformRettiwtTweetToV2(rettiwtTweet) {
+function transformRettiwtTweetToV2(rettiwtTweet, options = {}) {
   if (!rettiwtTweet) return null;
+
+  let mediaCollector;
+
+  if (options && typeof options === 'object') {
+    mediaCollector = options.mediaCollector;
+  }
   
   const v2Tweet = {
     id: rettiwtTweet.id,
@@ -215,10 +1030,18 @@ function transformRettiwtTweetToV2(rettiwtTweet) {
   }
   
   // Add media attachments if available
-  if (rettiwtTweet.media && rettiwtTweet.media.length > 0) {
-    v2Tweet.attachments = {
-      media_keys: rettiwtTweet.media.map(m => m.id || m.mediaKey || m.url)
-    };
+  if (Array.isArray(rettiwtTweet.media) && rettiwtTweet.media.length > 0) {
+    const mediaKeys = rettiwtTweet.media
+      .map(resolveMediaKey)
+      .filter(Boolean);
+
+    if (mediaKeys.length > 0) {
+      v2Tweet.attachments = {
+        media_keys: mediaKeys
+      };
+    }
+
+    collectMediaEntities(rettiwtTweet.media, mediaCollector);
   }
   
   // Add referenced tweets if this is a reply, quote, or retweet
@@ -248,6 +1071,23 @@ function transformRettiwtTweetToV2(rettiwtTweet) {
   }
   
   return v2Tweet;
+}
+
+function buildV2TweetFromRettiwt(rettiwtTweet, { tweetFieldsParam, userFieldsParam, mediaCollector } = {}) {
+  const v2Tweet = transformRettiwtTweetToV2(rettiwtTweet, { mediaCollector });
+  if (!v2Tweet) return null;
+
+  const filteredTweet = applyTweetFieldFilter(v2Tweet, tweetFieldsParam);
+
+  let author;
+  if (rettiwtTweet.tweetBy) {
+    const authorCandidate = transformRettiwtUserToV2(rettiwtTweet.tweetBy);
+    if (authorCandidate) {
+      author = applyUserFieldFilter(authorCandidate, userFieldsParam);
+    }
+  }
+
+  return { tweet: filteredTweet, author };
 }
 
 // Fetch author data using Twitter oEmbed API (no auth required)
@@ -352,7 +1192,7 @@ function transformUserToV2(v1User, includeAllFields = false) {
 }
 
 // Transform v1.1 tweet to v2 format with enhanced fields
-function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}) {
+function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}, mediaCollector) {
   const v2Tweet = {
     id: v1Tweet.id_str,
     text: v1Tweet.full_text || v1Tweet.text || '',
@@ -410,10 +1250,10 @@ function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}) 
       });
       // Store retweeted tweet for includes
       if (expansions.retweetedTweets) {
-        expansions.retweetedTweets.push(transformTweetToV2(v1Tweet.retweeted_status, includeAllFields));
+        expansions.retweetedTweets.push(transformTweetToV2(v1Tweet.retweeted_status, includeAllFields, {}, mediaCollector));
       }
     }
-    
+
     // Add quoted tweet reference and include full tweet if available
     if (v1Tweet.quoted_status || v1Tweet.quoted_status_id_str) {
       referencedTweets.push({
@@ -422,7 +1262,7 @@ function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}) 
       });
       // Store quoted tweet for includes
       if (v1Tweet.quoted_status && expansions.quotedTweets) {
-        expansions.quotedTweets.push(transformTweetToV2(v1Tweet.quoted_status, includeAllFields));
+        expansions.quotedTweets.push(transformTweetToV2(v1Tweet.quoted_status, includeAllFields, {}, mediaCollector));
       }
     }
     
@@ -470,10 +1310,18 @@ function transformTweetToV2(v1Tweet, includeAllFields = false, expansions = {}) 
       
       // Add media attachments from extended_entities (preferred) or entities
       const mediaEntities = v1Tweet.extended_entities?.media || v1Tweet.entities?.media;
-      if (mediaEntities && mediaEntities.length > 0) {
-        v2Tweet.attachments = {
-          media_keys: mediaEntities.map(m => m.id_str)
-        };
+      if (Array.isArray(mediaEntities) && mediaEntities.length > 0) {
+        const mediaKeys = mediaEntities
+          .map(resolveMediaKey)
+          .filter(Boolean);
+
+        if (mediaKeys.length > 0) {
+          v2Tweet.attachments = {
+            media_keys: mediaKeys
+          };
+        }
+
+        collectMediaEntities(mediaEntities, mediaCollector);
       }
     }
     
@@ -625,47 +1473,49 @@ module.exports = async (req, res) => {
 
   const path = req.url.replace(/\?.*$/, '');
   const query = req.query;
+  const pathParts = path.split('/').filter(p => p);
+  const authRequired = (detail = 'This endpoint requires user authentication', type = 'https://api.twitter.com/2/problems/client-not-enrolled') => {
+    return res.status(403).json({
+      errors: [{
+        title: 'Authorization Error',
+        detail,
+        type
+      }]
+    });
+  };
 
   try {
+
     // Root endpoint
     if (path === '/' || path === '') {
       return res.json({
         name: 'Twitter v2 API Proxy',
         version: '1.0.0',
         endpoints: {
-          users: [
-            'GET /2/users/:id',
-            'GET /2/users/:id/followers',
-            'GET /2/users/:id/following',
-            'GET /2/users/by/username/:username',
-            'GET /2/users/search'
-          ],
-          tweets: [
-            'GET /2/tweets/:id',
-            'GET /2/tweets/search/recent',
-            'GET /2/users/:id/tweets',
-            'GET /2/users/by/username/:username/tweets'
-          ],
-          lists: [
-            'GET /2/lists/:id',
-            'GET /2/lists/:id/members',
-            'GET /2/lists/:id/followers'
-          ],
-          trends: [
-            'GET /2/trends/place/:woeid',
-            'GET /2/trends/available',
-            'GET /2/trends/closest'
-          ],
-          geo: [
-            'GET /2/geo/search',
-            'GET /2/geo/reverse_geocode',
-            'GET /2/geo/id/:place_id'
-          ],
-          system: [
-            'GET /2/system/init-tokens'
-          ]
+          users: ENDPOINT_CATALOG.users,
+          tweets: ENDPOINT_CATALOG.tweets,
+          lists: ENDPOINT_CATALOG.lists,
+          system: ENDPOINT_CATALOG.system
         },
         note: 'This proxy provides FREE access to Twitter v2 API endpoints using rotating guest tokens to bypass rate limits'
+      });
+    }
+
+    if (path === '/health') {
+      const hasActiveGuestToken = Array.isArray(tokenPool.tokens)
+        && tokenPool.tokens.some(token => token.expires > Date.now());
+
+      return res.json({
+        status: 'ok',
+        guestTokenActive: hasActiveGuestToken,
+        endpoints: {
+          users: ENDPOINT_CATALOG.users,
+          tweets: ENDPOINT_CATALOG.tweets,
+          lists: ENDPOINT_CATALOG.lists,
+          geo: ENDPOINT_CATALOG.geo,
+          other: ENDPOINT_CATALOG.other,
+          system: ENDPOINT_CATALOG.system
+        }
       });
     }
     
@@ -690,287 +1540,730 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Parse the path
-    const pathParts = path.split('/').filter(p => p);
-
     // USERS ENDPOINTS
     
     // GET /2/users/:id/followers
-    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'followers') {
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts.length === 4 && pathParts[3] === 'followers') {
       const userId = pathParts[2];
-      let cursor = query.pagination_token ? Buffer.from(query.pagination_token, 'base64').toString('ascii') : '-1';
-      const requestedCount = Math.min(parseInt(query.max_results) || 100, 1000);
-      
-      // Since v1.1 API limits to 200 per request, we need to make multiple requests
-      // to fulfill requests for more than 200 followers
-      let allUsers = [];
-      let nextCursor = cursor;
-      let previousCursor = null;
-      let remainingCount = requestedCount;
-      
-      while (remainingCount > 0 && nextCursor !== '0') {
-        const batchSize = Math.min(remainingCount, 200);
-        
-        // Get a fresh token for each request from the pool
-        const guestToken = await getGuestToken();
-        
-        const response = await axios.get(
-          `${API_BASE}/1.1/followers/list.json`,
-          {
-            params: {
-              user_id: userId,
-              cursor: nextCursor,
-              count: batchSize,
-              skip_status: false,  // Get status for pinned tweets
-              include_user_entities: true  // Get entities for URLs
-            },
-            headers: {
-              'Authorization': `Bearer ${BEARER_TOKEN}`,
-              'x-guest-token': guestToken
-            }
-          }
-        );
-        
-        allUsers = allUsers.concat(response.data.users);
-        remainingCount -= response.data.users.length;
-        
-        // Keep track of cursors for pagination
-        if (allUsers.length === 0) {
-          // First batch - save the previous cursor
-          previousCursor = response.data.previous_cursor_str;
-        }
-        
-        nextCursor = response.data.next_cursor_str;
-        
-        // If we've got enough users or no more data, stop
-        if (response.data.users.length < batchSize || nextCursor === '0') {
-          break;
-        }
-      }
-      
-      const metaParams = {
-        result_count: allUsers.length
-      };
-      
-      if (nextCursor && nextCursor !== '0') {
-        metaParams.next_token = Buffer.from(nextCursor).toString('base64');
-      }
-      
-      if (previousCursor && previousCursor !== '0') {
-        metaParams.previous_token = Buffer.from(previousCursor).toString('base64');
-      }
-      
-      // Check if user.fields was requested
-      const userFields = query['user.fields']?.split(',') || [];
-      const includeAllFields = userFields.length > 0;
-      
-      const v2Response = {
-        data: allUsers.map(user => transformUserToV2(user, includeAllFields)),
-        meta: buildMetaObject(metaParams)
-      };
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const userFieldsParam = query['user.fields'];
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
 
-      return res.json(v2Response);
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const followers = await rettiwt.user.followers(userId, desiredCount, fetchCursor);
+        const list = Array.isArray(followers.list) ? followers.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const users = list
+          .slice(safeOffset, endIndex)
+          .map(user => transformRettiwtUserToV2(user))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        let nextCursor = undefined;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursor = fetchCursor;
+          nextOffset = endIndex;
+        } else if (followers.next) {
+          nextCursor = followers.next;
+          nextOffset = 0;
+        }
+
+        const nextToken = encodePaginationToken(nextCursor, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        console.error('Rettiwt followers error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Rettiwt unavailable for followers lookup',
+            detail: error.message,
+            code: 'rettiwt_unavailable'
+          }]
+        });
+      }
     }
 
     // GET /2/users/:id/following
-    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'following') {
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts.length === 4 && pathParts[3] === 'following') {
       const userId = pathParts[2];
-      let cursor = query.pagination_token ? Buffer.from(query.pagination_token, 'base64').toString('ascii') : '-1';
-      const requestedCount = Math.min(parseInt(query.max_results) || 100, 1000);
-      
-      // Since v1.1 API limits to 200 per request, we need to make multiple requests
-      // to fulfill requests for more than 200 users
-      let allUsers = [];
-      let nextCursor = cursor;
-      let previousCursor = null;
-      let remainingCount = requestedCount;
-      
-      while (remainingCount > 0 && nextCursor !== '0') {
-        const batchSize = Math.min(remainingCount, 200);
-        
-        // Get a fresh token for each request from the pool
-        const guestToken = await getGuestToken();
-        
-        const response = await axios.get(
-          `${API_BASE}/1.1/friends/list.json`,
-          {
-            params: {
-              user_id: userId,
-              cursor: nextCursor,
-              count: batchSize,
-              skip_status: false,  // Get status for pinned tweets
-              include_user_entities: true  // Get entities for URLs
-            },
-            headers: {
-              'Authorization': `Bearer ${BEARER_TOKEN}`,
-              'x-guest-token': guestToken
-            }
-          }
-        );
-        
-        allUsers = allUsers.concat(response.data.users);
-        remainingCount -= response.data.users.length;
-        
-        // Keep track of cursors for pagination
-        if (allUsers.length === 0) {
-          // First batch - save the previous cursor
-          previousCursor = response.data.previous_cursor_str;
-        }
-        
-        nextCursor = response.data.next_cursor_str;
-        
-        // If we've got enough users or no more data, stop
-        if (response.data.users.length < batchSize || nextCursor === '0') {
-          break;
-        }
-      }
-      
-      const metaParams = {
-        result_count: allUsers.length
-      };
-      
-      if (nextCursor && nextCursor !== '0') {
-        metaParams.next_token = Buffer.from(nextCursor).toString('base64');
-      }
-      
-      if (previousCursor && previousCursor !== '0') {
-        metaParams.previous_token = Buffer.from(previousCursor).toString('base64');
-      }
-      
-      // Check if user.fields was requested
-      const userFields = query['user.fields']?.split(',') || [];
-      const includeAllFields = userFields.length > 0;
-      
-      const v2Response = {
-        data: allUsers.map(user => transformUserToV2(user, includeAllFields)),
-        meta: buildMetaObject(metaParams)
-      };
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+      const userFieldsParam = query['user.fields'];
 
-      return res.json(v2Response);
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const following = await rettiwt.user.following(userId, desiredCount, fetchCursor);
+        const list = Array.isArray(following.list) ? following.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const users = list
+          .slice(safeOffset, endIndex)
+          .map(user => transformRettiwtUserToV2(user))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        let nextCursor = undefined;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursor = fetchCursor;
+          nextOffset = endIndex;
+        } else if (following.next) {
+          nextCursor = following.next;
+          nextOffset = 0;
+        }
+
+        const nextToken = encodePaginationToken(nextCursor, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        console.error('Rettiwt following error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Rettiwt unavailable for following lookup',
+            detail: error.message,
+            code: 'rettiwt_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/users/:source_id/following/:target_id
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'following' && pathParts.length === 5) {
+      const sourceId = pathParts[2];
+      const targetId = pathParts[4];
+
+      try {
+        const relationshipData = await fetchTwitterV1('friendships/show.json', {
+          source_id: sourceId,
+          target_id: targetId,
+          include_entities: true
+        }, 4000);
+
+        const relationship = relationshipData?.relationship;
+        if (!relationship) {
+          return res.status(404).json({
+            errors: [{
+              message: 'Relationship not found',
+              code: 'resource_not_found'
+            }]
+          });
+        }
+
+        return res.json({
+          data: {
+            following: Boolean(relationship.source?.following),
+            pending_follow: Boolean(relationship.source?.following_requested),
+            muting: Boolean(relationship.source?.muting),
+            blocking: Boolean(relationship.source?.blocking)
+          }
+        });
+      } catch (error) {
+        console.error('Relationship lookup error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Relationship lookup unavailable',
+            detail: error.message,
+            code: 'relationship_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/lists/:id
+    if (pathParts[0] === '2' && pathParts[1] === 'lists' && pathParts.length === 3) {
+      const listId = pathParts[2];
+      const userFieldsParam = query['user.fields'];
+      const listFieldsParam = query['list.fields'];
+
+      try {
+        const listData = await fetchTwitterV1('lists/show.json', { list_id: listId });
+
+        const v2List = transformListToV2(listData);
+        if (!v2List) {
+          return res.status(404).json({
+            errors: [{
+              message: 'List not found',
+              code: 'resource_not_found'
+            }]
+          });
+        }
+
+        const result = { data: applyListFieldFilter(v2List, listFieldsParam) };
+
+        const expansions = query.expansions?.split(',') || [];
+        if (expansions.includes('owner_id') && listData.user) {
+          const owner = transformUserToV2(listData.user, true);
+          if (owner) {
+            result.includes = { users: [applyUserFieldFilter(owner, userFieldsParam)] };
+          }
+        }
+
+        return res.json(result);
+      } catch (error) {
+        const status = error.response?.status;
+        if (status === 404) {
+          return res.status(404).json({
+            errors: [{
+              message: 'List not found',
+              code: 'resource_not_found'
+            }]
+          });
+        }
+
+        console.error('List details error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'List details unavailable',
+            detail: error.message,
+            code: 'list_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/lists/:id/followers
+    if (pathParts[0] === '2' && pathParts[1] === 'lists' && pathParts[3] === 'followers') {
+      const listId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const v1Cursor = cursor ?? '-1';
+      const userFieldsParam = query['user.fields'];
+      const includeAllFields = Boolean(userFieldsParam);
+
+      try {
+        const data = await fetchTwitterV1('lists/subscribers.json', {
+          list_id: listId,
+          count: maxResults,
+          cursor: v1Cursor,
+          include_entities: true,
+          skip_status: true
+        });
+
+        const users = (data.users || [])
+          .map(user => transformUserToV2(user, includeAllFields))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        if (data.next_cursor_str && data.next_cursor_str !== '0') {
+          metaParams.next_token = encodePaginationToken(data.next_cursor_str, 0);
+        }
+        if (data.previous_cursor_str && data.previous_cursor_str !== '0') {
+          metaParams.previous_token = encodePaginationToken(data.previous_cursor_str, 0);
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        const status = error.response?.status;
+        if (status === 404) {
+          return res.status(404).json({
+            errors: [{
+              message: 'List not found',
+              code: 'resource_not_found'
+            }]
+          });
+        }
+
+        console.error('List followers error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'List followers unavailable',
+            detail: error.message,
+            code: 'list_followers_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/lists/:id/members
+    if (pathParts[0] === '2' && pathParts[1] === 'lists' && pathParts[3] === 'members') {
+      const listId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const members = await rettiwt.list.members(listId, desiredCount, fetchCursor);
+        const list = Array.isArray(members.list) ? members.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const users = list
+          .slice(safeOffset, endIndex)
+          .map(user => transformRettiwtUserToV2(user))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        let nextCursorValue;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursorValue = fetchCursor;
+          nextOffset = endIndex;
+        } else if (members.next) {
+          nextCursorValue = members.next;
+        }
+
+        const nextToken = encodePaginationToken(nextCursorValue, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        console.error('List members error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'List members unavailable',
+            detail: error.message,
+            code: 'list_members_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/lists/:id/tweets
+    if (pathParts[0] === '2' && pathParts[1] === 'lists' && pathParts[3] === 'tweets') {
+      const listId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const mediaFieldsParam = query['media.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const includeAuthorExpansion = expansions.includes('author_id');
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
+
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const listTimeline = await rettiwt.list.tweets(listId, desiredCount, fetchCursor);
+        const list = Array.isArray(listTimeline.list) ? listTimeline.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const tweets = list
+          .slice(safeOffset, endIndex)
+          .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+          .filter(Boolean)
+          .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+
+        const metaParams = {
+          result_count: tweets.length
+        };
+
+        let nextCursorValue;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursorValue = fetchCursor;
+          nextOffset = endIndex;
+        } else if (listTimeline.next) {
+          nextCursorValue = listTimeline.next;
+        }
+
+        const nextToken = encodePaginationToken(nextCursorValue, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        const response = {
+          data: tweets,
+          meta: buildMetaObject(metaParams)
+        };
+
+        if (includeAuthorExpansion && list.length > 0) {
+          const users = new Map();
+          list.slice(safeOffset, endIndex).forEach(tweet => {
+            if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
+              const user = transformRettiwtUserToV2(tweet.tweetBy);
+              if (user) {
+                users.set(user.id, applyUserFieldFilter(user, userFieldsParam));
+              }
+            }
+          });
+
+          if (users.size > 0) {
+            response.includes = {
+              users: Array.from(users.values())
+            };
+          }
+        }
+
+        appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
+
+        return res.json(response);
+      } catch (error) {
+        console.error('List tweets error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'List tweets unavailable',
+            detail: error.message,
+            code: 'list_tweets_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/users/:id/list_memberships
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'list_memberships') {
+      const userId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const v1Cursor = cursor ?? '-1';
+      const userFieldsParam = query['user.fields'];
+
+      try {
+        const data = await fetchTwitterV1('lists/memberships.json', {
+          user_id: userId,
+          count: maxResults,
+          cursor: v1Cursor,
+          include_entities: true
+        });
+
+        const rawLists = Array.isArray(data.lists) ? data.lists : [];
+        const listFieldsParam = query['list.fields'];
+        const lists = rawLists
+          .map(transformListToV2)
+          .filter(Boolean)
+          .map(list => applyListFieldFilter(list, listFieldsParam));
+
+        const metaParams = {
+          result_count: lists.length
+        };
+
+        if (data.next_cursor_str && data.next_cursor_str !== '0') {
+          metaParams.next_token = encodePaginationToken(data.next_cursor_str, 0);
+        }
+        if (data.previous_cursor_str && data.previous_cursor_str !== '0') {
+          metaParams.previous_token = encodePaginationToken(data.previous_cursor_str, 0);
+        }
+
+        const response = {
+          data: lists,
+          meta: buildMetaObject(metaParams)
+        };
+
+        const expansions = query.expansions?.split(',') || [];
+        if (expansions.includes('owner_id')) {
+          const owners = new Map();
+          rawLists.forEach(list => {
+            if (list.user) {
+              const owner = transformUserToV2(list.user, true);
+              if (owner && owner.id && !owners.has(owner.id)) {
+                owners.set(owner.id, applyUserFieldFilter(owner, userFieldsParam));
+              }
+            }
+          });
+          if (owners.size > 0) {
+            response.includes = { users: Array.from(owners.values()) };
+          }
+        }
+
+        return res.json(response);
+      } catch (error) {
+        console.error('List memberships error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'List memberships unavailable',
+            detail: error.message,
+            code: 'list_memberships_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/users/:id/owned_lists
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'owned_lists') {
+      const userId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const v1Cursor = cursor ?? '-1';
+
+      try {
+        const data = await fetchTwitterV1('lists/ownerships.json', {
+          user_id: userId,
+          count: maxResults,
+          cursor: v1Cursor,
+          include_entities: true
+        });
+
+        const rawLists = Array.isArray(data.lists) ? data.lists : [];
+        const listFieldsParam = query['list.fields'];
+        const lists = rawLists
+          .map(transformListToV2)
+          .filter(Boolean)
+          .map(list => applyListFieldFilter(list, listFieldsParam));
+
+        const metaParams = {
+          result_count: lists.length
+        };
+
+        if (data.next_cursor_str && data.next_cursor_str !== '0') {
+          metaParams.next_token = encodePaginationToken(data.next_cursor_str, 0);
+        }
+        if (data.previous_cursor_str && data.previous_cursor_str !== '0') {
+          metaParams.previous_token = encodePaginationToken(data.previous_cursor_str, 0);
+        }
+
+        const response = {
+          data: lists,
+          meta: buildMetaObject(metaParams)
+        };
+
+        const expansions = query.expansions?.split(',') || [];
+        if (expansions.includes('owner_id')) {
+          const owners = new Map();
+          rawLists.forEach(list => {
+            if (list.user) {
+              const owner = transformUserToV2(list.user, true);
+              if (owner && owner.id && !owners.has(owner.id)) {
+                owners.set(owner.id, applyUserFieldFilter(owner, userFieldsParam));
+              }
+            }
+          });
+          if (owners.size > 0) {
+            response.includes = { users: Array.from(owners.values()) };
+          }
+        }
+
+        return res.json(response);
+      } catch (error) {
+        console.error('Owned lists error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Owned lists unavailable',
+            detail: error.message,
+            code: 'owned_lists_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/users/:id/followed_lists
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'followed_lists') {
+      const userId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const v1Cursor = cursor ?? '-1';
+
+      try {
+        const data = await fetchTwitterV1('lists/subscriptions.json', {
+          user_id: userId,
+          count: maxResults,
+          cursor: v1Cursor,
+          include_entities: true
+        });
+
+        const rawLists = Array.isArray(data.lists) ? data.lists : [];
+        const listFieldsParam = query['list.fields'];
+        const lists = rawLists
+          .map(transformListToV2)
+          .filter(Boolean)
+          .map(list => applyListFieldFilter(list, listFieldsParam));
+
+        const metaParams = {
+          result_count: lists.length
+        };
+
+        if (data.next_cursor_str && data.next_cursor_str !== '0') {
+          metaParams.next_token = encodePaginationToken(data.next_cursor_str, 0);
+        }
+        if (data.previous_cursor_str && data.previous_cursor_str !== '0') {
+          metaParams.previous_token = encodePaginationToken(data.previous_cursor_str, 0);
+        }
+
+        const response = {
+          data: lists,
+          meta: buildMetaObject(metaParams)
+        };
+
+        const expansions = query.expansions?.split(',') || [];
+        if (expansions.includes('owner_id')) {
+          const owners = new Map();
+          rawLists.forEach(list => {
+            if (list.user) {
+              const owner = transformUserToV2(list.user, true);
+              if (owner && owner.id && !owners.has(owner.id)) {
+                owners.set(owner.id, applyUserFieldFilter(owner, userFieldsParam));
+              }
+            }
+          });
+          if (owners.size > 0) {
+            response.includes = { users: Array.from(owners.values()) };
+          }
+        }
+
+        return res.json(response);
+      } catch (error) {
+        console.error('Followed lists error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Followed lists unavailable',
+            detail: error.message,
+            code: 'followed_lists_unavailable'
+          }]
+        });
+      }
     }
 
     // GET /2/users?ids=... (multiple users by ID)
-    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts.length === 2 && query.ids) {
-      const userIds = query.ids.split(',');
-      const users = [];
-      
-      for (const userId of userIds.slice(0, 100)) { // Limit to 100 users
-        try {
-          // Use Rettiwt to get user timeline which includes user data
-          const timeline = await rettiwt.user.timeline(userId);
-          
-          if (timeline && timeline.list && timeline.list.length > 0) {
-            const firstTweet = timeline.list[0];
-            if (firstTweet && firstTweet.tweetBy) {
-              const rettiwtUser = firstTweet.tweetBy;
-              const v2User = transformRettiwtUserToV2(rettiwtUser);
-              
-              if (v2User) {
-                v2User.id = userId; // Ensure correct ID
-                users.push(v2User);
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`Failed to fetch user ${userId}:`, error.message);
-          // Skip failed users
+    const hasIdsParam = ('ids' in query) || /\bids=/.test(req.url || '');
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts.length === 2 && hasIdsParam) {
+      const userFieldsParam = query['user.fields'];
+      const rawIds = String(query.ids || '').split(',');
+      const uniqueIds = Array.from(new Set(rawIds.map(id => id.trim()).filter(Boolean))).slice(0, 100);
+
+      if (uniqueIds.length === 0) {
+        return res.status(400).json({
+          errors: [{
+            detail: 'ids parameter must contain at least one user id',
+            title: 'Invalid Request',
+            type: 'https://api.twitter.com/2/problems/invalid-request',
+            parameter: 'ids'
+          }]
+        });
+      }
+
+      const data = [];
+      const errorsList = [];
+
+      for (const id of uniqueIds) {
+        const user = await fetchRettiwtUserProfile(id, userFieldsParam);
+        if (user) {
+          data.push(user);
+        } else {
+          errorsList.push({
+            value: id,
+            detail: 'Could not find user with referenced id',
+            title: 'Not Found Error',
+            type: 'https://api.twitter.com/2/problems/resource-not-found',
+            resource_type: 'user',
+            parameter: 'ids',
+            resource_id: id
+          });
         }
       }
-      
-      return res.json({
-        data: users
-      });
+
+      const responsePayload = { data };
+      if (errorsList.length > 0) {
+        responsePayload.errors = errorsList;
+      }
+
+      return res.json(responsePayload);
     }
 
     // GET /2/users/:id (single user by ID)
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts.length === 3 && !isNaN(pathParts[2])) {
       const userId = pathParts[2];
-      
+      const userFieldsParam = query['user.fields'];
+
+      const user = await fetchRettiwtUserProfile(userId, userFieldsParam);
+      if (user) {
+        return res.json({ data: user });
+      }
+
+      // Rettiwt failed, attempt legacy fallback
       try {
-        // Use Rettiwt to get user timeline which includes user data
-        const timeline = await rettiwt.user.timeline(userId);
-        
-        // Extract user data from the timeline response
-        if (timeline && timeline.list && timeline.list.length > 0) {
-          const firstTweet = timeline.list[0];
-          if (firstTweet && firstTweet.tweetBy) {
-            const rettiwtUser = firstTweet.tweetBy;
-            const v2User = transformRettiwtUserToV2(rettiwtUser);
-            
-            if (v2User) {
-              // Ensure the ID matches what was requested
-              v2User.id = userId;
-              return res.json({
-                data: v2User
-              });
-            }
+        const guestToken = await getGuestToken();
+        const response = await axios.get(
+          `${API_BASE}/1.1/users/show.json`,
+          {
+            params: {
+              user_id: userId,
+              include_entities: true
+            },
+            headers: {
+              'Authorization': `Bearer ${BEARER_TOKEN}`,
+              'x-guest-token': guestToken
+            },
+            timeout: 5000
           }
-        }
-        
-        // If no timeline data, try to get user following list which also has user info
-        const following = await rettiwt.user.following(userId);
-        if (following && following.list && following.list.length > 0) {
-          // We can infer some basic info from the fact that this user exists
-          // But we don't have full profile data this way
+        );
+
+        if (response.data) {
+          const userFields = query['user.fields']?.split(',') || [];
+          const includeAllFields = userFields.length > 0;
+
+          const fallbackUser = applyUserFieldFilter(
+            transformUserToV2(response.data, includeAllFields),
+            userFieldsParam
+          );
           return res.json({
-            data: {
-              id: userId,
-              username: `user_${userId}`,
-              name: `User ${userId}`,
-              created_at: new Date().toISOString(),
-              protected: false,
-              description: '',
-              location: '',
-              url: '',
-              verified: false,
-              profile_image_url: null,
-              public_metrics: {
-                followers_count: 0,
-                following_count: following.list.length,
-                tweet_count: 0,
-                listed_count: 0
-              }
-            }
+            data: fallbackUser
           });
         }
       } catch (error) {
-        console.error('Rettiwt user lookup error:', error.message);
-        
-        // Try v1.1 API as fallback
-        try {
-          const guestToken = await getGuestToken();
-          const response = await axios.get(
-            `${API_BASE}/1.1/users/show.json`,
-            {
-              params: {
-                user_id: userId,
-                include_entities: true
-              },
-              headers: {
-                'Authorization': `Bearer ${BEARER_TOKEN}`,
-                'x-guest-token': guestToken
-              },
-              timeout: 5000
-            }
-          );
-
-          if (response.data) {
-            const userFields = query['user.fields']?.split(',') || [];
-            const includeAllFields = userFields.length > 0;
-            
-            return res.json({
-              data: transformUserToV2(response.data, includeAllFields)
-            });
-          }
-        } catch (v1Error) {
-          console.error('v1.1 fallback failed:', v1Error.response?.data || v1Error.message);
-        }
+        console.error('User lookup fallback failed:', error.response?.data || error.message);
       }
-      
+
       return res.status(404).json({
         errors: [{
-          message: 'User not found',
-          code: 'resource_not_found'
+          value: userId,
+          detail: 'Could not find user with referenced id',
+          title: 'Not Found Error',
+          type: 'https://api.twitter.com/2/problems/resource-not-found',
+          resource_type: 'user',
+          parameter: 'id',
+          resource_id: userId
         }]
       });
     }
@@ -979,6 +2272,11 @@ module.exports = async (req, res) => {
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[2] === 'by' && pathParts[3] === 'username' && pathParts[5] === 'tweets') {
       const username = pathParts[4];
       const { max_results = 10, pagination_token } = query;
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const mediaFieldsParam = query['media.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
       
       try {
         const nitterResponse = await axios.get(
@@ -993,16 +2291,15 @@ module.exports = async (req, res) => {
 
         if (nitterResponse.data && nitterResponse.data.data) {
           const timeline = nitterResponse.data.data.timeline || [];
-          // User data might be in data.user or in the first timeline item
-          const userData = nitterResponse.data.data.user || 
+          const userData = nitterResponse.data.data.user ||
                           (timeline.length > 0 ? timeline[0].user : null);
           
-          // Check if tweet.fields was requested
-          const tweetFields = query['tweet.fields']?.split(',') || [];
+          const tweetFields = tweetFieldsParam?.split(',') || [];
           const includeAllFields = tweetFields.length > 0;
+          const mediaCollector = includeMediaExpansion ? new Map() : null;
           
           const v2Tweets = timeline.slice(0, max_results).map(tweet => {
-            const v2Tweet = {
+            const baseTweet = {
               id: tweet.id,
               text: tweet.text || tweet.fullText || '',
               created_at: tweet.time ? new Date(tweet.time * 1000).toISOString() : new Date().toISOString(),
@@ -1017,56 +2314,57 @@ module.exports = async (req, res) => {
               }
             };
             
-            // Add additional fields when requested
             if (includeAllFields) {
-              // Add conversation_id (from Nitter)
               if (tweet.conversationId) {
-                v2Tweet.conversation_id = tweet.conversationId;
+                baseTweet.conversation_id = tweet.conversationId;
               } else {
-                v2Tweet.conversation_id = tweet.id; // Default to tweet ID for root tweets
+                baseTweet.conversation_id = tweet.id;
               }
               
-              // Add language if available
               if (tweet.lang) {
-                v2Tweet.lang = tweet.lang;
+                baseTweet.lang = tweet.lang;
               }
               
-              // Add possibly_sensitive flag
               if (tweet.sensitive !== undefined) {
-                v2Tweet.possibly_sensitive = tweet.sensitive;
+                baseTweet.possibly_sensitive = tweet.sensitive;
               }
               
-              // Add reply info
               if (tweet.replyTo) {
-                v2Tweet.in_reply_to_user_id = tweet.replyTo;
+                baseTweet.in_reply_to_user_id = tweet.replyTo;
               }
               
-              // Add entities if available
               if (tweet.hashtags || tweet.mentions || tweet.urls) {
-                v2Tweet.entities = {};
+                baseTweet.entities = {};
                 
                 if (tweet.hashtags && tweet.hashtags.length > 0) {
-                  v2Tweet.entities.hashtags = tweet.hashtags;
+                  baseTweet.entities.hashtags = tweet.hashtags;
                 }
                 
                 if (tweet.mentions && tweet.mentions.length > 0) {
-                  v2Tweet.entities.mentions = tweet.mentions;
+                  baseTweet.entities.mentions = tweet.mentions;
                 }
                 
                 if (tweet.urls && tweet.urls.length > 0) {
-                  v2Tweet.entities.urls = tweet.urls;
+                  baseTweet.entities.urls = tweet.urls;
                 }
-              }
-              
-              // Add media attachments
-              if (tweet.media && tweet.media.length > 0) {
-                v2Tweet.attachments = {
-                  media_keys: tweet.media.map(m => m.id || m.url)
-                };
               }
             }
             
-            return v2Tweet;
+            if (Array.isArray(tweet.media) && tweet.media.length > 0) {
+              const mediaKeys = tweet.media
+                .map(resolveMediaKey)
+                .filter(Boolean);
+              
+              if (mediaKeys.length > 0) {
+                baseTweet.attachments = {
+                  media_keys: mediaKeys
+                };
+              }
+              
+              collectMediaEntities(tweet.media, mediaCollector);
+            }
+            
+            return applyTweetFieldFilter(baseTweet, tweetFieldsParam);
           });
 
           // Build meta object in exact X API v2 format
@@ -1093,9 +2391,6 @@ module.exports = async (req, res) => {
             meta: buildMetaObject(metaParams)
           };
 
-          // Check if expansions were requested
-          const expansions = query.expansions?.split(',') || [];
-          
           // Add includes section if author_id expansion was requested
           if (expansions.includes('author_id')) {
             // If we have userData from Nitter, use it
@@ -1136,7 +2431,7 @@ module.exports = async (req, res) => {
             }
             
             response.includes = {
-              users: [userV2]
+              users: [applyUserFieldFilter(userV2, userFieldsParam)]
             };
             } else if (v2Tweets.length > 0) {
               // No userData from Nitter, but we have tweets
@@ -1145,17 +2440,21 @@ module.exports = async (req, res) => {
               const oEmbedAuthor = await fetchAuthorFromOEmbed(firstTweetId);
               
               if (oEmbedAuthor) {
+                const fallbackUser = {
+                  id: v2Tweets[0].author_id,
+                  username: oEmbedAuthor.username,
+                  name: oEmbedAuthor.name
+                };
+
                 response.includes = {
-                  users: [{
-                    id: v2Tweets[0].author_id,
-                    username: oEmbedAuthor.username,
-                    name: oEmbedAuthor.name
-                  }]
+                  users: [applyUserFieldFilter(fallbackUser, userFieldsParam)]
                 };
               }
             }
           }
 
+          appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
+          
           return res.json(response);
         }
       } catch (error) {
@@ -1173,81 +2472,77 @@ module.exports = async (req, res) => {
     // GET /2/users/by/username/:username
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[2] === 'by' && pathParts[3] === 'username' && pathParts.length === 5) {
       const username = pathParts[4];
-      
-      try {
-        // Use Nitter to get user data
-        const response = await axios.get(
-          `${NITTER_API}/${username}`,
-          {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-          }
-        );
+      const userFieldsParam = query['user.fields'];
+      const user = await fetchUserProfile(username, userFieldsParam);
 
-        if (response.data && response.data.data) {
-          // Extract user data from timeline response
-          const userData = response.data.data.user || (response.data.data.timeline && response.data.data.timeline[0]?.user);
-          
-          if (userData) {
-            const v2User = {
-              id: userData.id || userData.rest_id,
-              username: userData.username || userData.screen_name,
-              name: userData.fullname || userData.name,
-              created_at: userData.joinDate ? new Date(userData.joinDate * 1000).toISOString() : new Date().toISOString(),
-              protected: userData.protected || false,
-              description: userData.bio || userData.description || '',
-              location: userData.location || '',
-              url: userData.website || '',
-              verified: userData.verified || false,
-              public_metrics: {
-                followers_count: userData.followers || userData.followers_count || 0,
-                following_count: userData.following || userData.friends_count || 0,
-                tweet_count: userData.tweets || userData.statuses_count || 0,
-                listed_count: userData.listed_count || 0
-              }
-            };
-            
-            // Add profile image URL if available
-            if (userData.userPic) {
-              v2User.profile_image_url = `https://pbs.twimg.com/${userData.userPic}`;
-            }
-            
-            // Add profile banner URL if available
-            if (userData.banner) {
-              v2User.profile_banner_url = `https://pbs.twimg.com/${userData.banner}`;
-            }
-            
-            // Add pinned tweet ID if available
-            if (userData.pinnedTweet && userData.pinnedTweet !== 0) {
-              v2User.pinned_tweet_id = userData.pinnedTweet.toString();
-            }
-            
-            // Add verified type if available
-            if (userData.verifiedType) {
-              v2User.verified_type = userData.verifiedType.toLowerCase();
-            }
-            
-            return res.json({
-              data: v2User
-            });
-          }
-        }
-      } catch (error) {
-        console.error('Nitter user lookup error:', error.message);
+      if (user) {
+        return res.json({ data: user });
       }
 
       return res.status(404).json({
         errors: [{
-          message: 'User not found'
+          value: username,
+          detail: 'Could not find user with referenced username',
+          title: 'Not Found Error',
+          type: 'https://api.twitter.com/2/problems/resource-not-found',
+          resource_type: 'user',
+          parameter: 'username'
         }]
       });
+    }
+
+    // GET /2/users/by?usernames=...
+    if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[2] === 'by' && pathParts.length === 3) {
+      const usernamesParam = query.usernames || query.usernames?.join?.(',');
+      const userFieldsParam = query['user.fields'];
+
+      if (!usernamesParam) {
+        return res.status(400).json({
+          errors: [{
+            detail: 'usernames parameter is required',
+            title: 'Invalid Request',
+            type: 'https://api.twitter.com/2/problems/invalid-request',
+            parameter: 'usernames'
+          }]
+        });
+      }
+
+      const usernameList = Array.from(new Set(usernamesParam.split(',').map(name => name.trim()).filter(Boolean))).slice(0, 100);
+      const results = [];
+      const errorsList = [];
+
+      for (const username of usernameList) {
+        const user = await fetchUserProfile(username, userFieldsParam);
+        if (user) {
+          results.push(user);
+        } else {
+          errorsList.push({
+            value: username,
+            detail: 'Could not find user with referenced username',
+            title: 'Not Found Error',
+            type: 'https://api.twitter.com/2/problems/resource-not-found',
+            resource_type: 'user',
+            parameter: 'usernames'
+          });
+        }
+      }
+
+      const response = { data: results };
+      if (errorsList.length > 0) {
+        response.errors = errorsList;
+      }
+
+      return res.json(response);
     }
 
     // GET /2/users/search
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[2] === 'search') {
       const searchQuery = query.query || query.q;
-      
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 10 : maxResultsParam, 100));
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const userFieldsParam = query['user.fields'];
+
       if (!searchQuery) {
         return res.status(400).json({
           errors: [{
@@ -1257,69 +2552,365 @@ module.exports = async (req, res) => {
       }
 
       try {
-        const response = await axios.get(
-          `${SNAPLYTICS_API}`,
-          {
-            params: {
-              data: `https://twitter.com/search?q=${encodeURIComponent(searchQuery)}&f=user`,
-              type: 'user'
-            },
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        const typeahead = await fetchTwitterV1('search/typeahead.json', {
+          q: searchQuery,
+          result_type: 'users',
+          count: maxResults,
+          src: 'search_box'
+        }, 6000);
+
+        const users = Array.isArray(typeahead.users)
+          ? typeahead.users
+              .slice(0, maxResults)
+              .map(transformTypeaheadUserToV2)
+              .filter(Boolean)
+              .map(user => applyUserFieldFilter(user, userFieldsParam))
+          : [];
+
+        const responsePayload = {
+          data: users,
+          meta: buildMetaObject({ result_count: users.length })
+        };
+
+        return res.json(responsePayload);
+      } catch (error) {
+        console.error('Typeahead user search error:', error.message);
+
+        // Fallback to Nitter if typeahead fails
+        try {
+          const params = {
+            q: searchQuery,
+            f: 'users'
+          };
+
+          if (cursor) {
+            params.cursor = cursor;
+          }
+
+          const response = await axios.get(
+            `${NITTER_API}/search`,
+            {
+              params,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              },
+              timeout: 10000
+            }
+          );
+
+          const nitterUsers = response.data?.data?.users || [];
+          const resultUsers = nitterUsers
+            .slice(0, maxResults)
+            .map(user => transformNitterUserToV2(user))
+            .filter(Boolean)
+            .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+          const metaParams = {
+            result_count: resultUsers.length
+          };
+
+          const bottomCursor = response.data?.data?.pagination?.bottom;
+          if (bottomCursor) {
+            const nextToken = encodePaginationToken(bottomCursor, 0);
+            if (nextToken) {
+              metaParams.next_token = nextToken;
             }
           }
-        );
 
-        const users = response.data.users || [];
-        
-        const v2Users = users.map(user => ({
-          id: user.rest_id,
-          username: user.screen_name,
-          name: user.name,
-          description: user.description || '',
-          created_at: new Date(user.created_at).toISOString(),
-          protected: user.protected || false,
-          verified: user.verified || false,
-          profile_image_url: user.profile_image_url_https,
-          public_metrics: {
-            followers_count: user.followers_count || 0,
-            following_count: user.friends_count || 0,
-            tweet_count: user.statuses_count || 0,
-            listed_count: user.listed_count || 0
-          }
-        }));
-        
-        return res.json({
-          data: v2Users,
-          meta: buildMetaObject({
-            result_count: users.length
-          })
-        });
-      } catch (error) {
-        console.error('Snaplytics error:', error.message);
-        return res.json({
-          data: [],
-          meta: {
-            result_count: 0
-          }
-        });
+          return res.json({
+            data: resultUsers,
+            meta: buildMetaObject(metaParams)
+          });
+        } catch (fallbackError) {
+          console.error('Nitter fallback user search error:', fallbackError.message);
+          return res.status(503).json({
+            errors: [{
+              message: 'User search unavailable',
+              detail: fallbackError.message,
+              code: 'user_search_unavailable'
+            }]
+          });
+        }
       }
     }
 
     // TWEET ENDPOINTS
 
+    // GET /2/tweets/:id/liking_users
+    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[3] === 'liking_users') {
+      const tweetId = pathParts[2];
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const mediaFieldsParam = query['media.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
+      const includeAuthorExpansion = expansions.includes('author_id');
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const likers = await rettiwt.tweet.likers(tweetId, desiredCount, fetchCursor);
+        const list = Array.isArray(likers.list) ? likers.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const users = list
+          .slice(safeOffset, endIndex)
+          .map(user => transformRettiwtUserToV2(user))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        let nextCursorValue;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursorValue = fetchCursor;
+          nextOffset = endIndex;
+        } else if (likers.next) {
+          nextCursorValue = likers.next;
+        }
+
+        const nextToken = encodePaginationToken(nextCursorValue, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        if (users.length === 0) {
+          const metrics = await fetchTweetMetrics(tweetId);
+          if (!metrics || metrics.like_count > 0) {
+            return res.status(503).json({
+              errors: [{
+                message: 'Tweet likers unavailable',
+                detail: 'Upstream returned no liker data despite recorded likes',
+                code: 'tweet_likers_unavailable'
+              }]
+            });
+          }
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        console.error('Tweet likers error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Tweet likers unavailable',
+            detail: error.message,
+            code: 'tweet_likers_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/tweets/:id/retweeted_by
+    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[3] === 'retweeted_by') {
+      const tweetId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor, offset } = parsePaginationToken(query.pagination_token);
+      const paginationOffset = Math.max(0, Number(offset) || 0);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+
+      try {
+        const desiredCount = Math.min(100, Math.max(maxResults + paginationOffset, 20));
+        const retweeters = await rettiwt.tweet.retweeters(tweetId, desiredCount, fetchCursor);
+        const list = Array.isArray(retweeters.list) ? retweeters.list : [];
+
+        const safeOffset = Math.min(paginationOffset, list.length);
+        const endIndex = Math.min(safeOffset + maxResults, list.length);
+        const users = list
+          .slice(safeOffset, endIndex)
+          .map(user => transformRettiwtUserToV2(user))
+          .filter(Boolean)
+          .map(user => applyUserFieldFilter(user, userFieldsParam));
+
+        const metaParams = {
+          result_count: users.length
+        };
+
+        let nextCursorValue;
+        let nextOffset = 0;
+
+        if (endIndex < list.length) {
+          nextCursorValue = fetchCursor;
+          nextOffset = endIndex;
+        } else if (retweeters.next) {
+          nextCursorValue = retweeters.next;
+        }
+
+        const nextToken = encodePaginationToken(nextCursorValue, nextOffset);
+        if (nextToken) {
+          metaParams.next_token = nextToken;
+        }
+
+        if (users.length === 0) {
+          const metrics = await fetchTweetMetrics(tweetId);
+          if (!metrics || metrics.retweet_count > 0) {
+            return res.status(503).json({
+              errors: [{
+                message: 'Tweet retweeters unavailable',
+                detail: 'Upstream returned no retweeter data despite recorded retweets',
+                code: 'tweet_retweeters_unavailable'
+              }]
+            });
+          }
+        }
+
+        return res.json({
+          data: users,
+          meta: buildMetaObject(metaParams)
+        });
+      } catch (error) {
+        console.error('Tweet retweeters error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Tweet retweeters unavailable',
+            detail: error.message,
+            code: 'tweet_retweeters_unavailable'
+          }]
+        });
+      }
+    }
+
+    // GET /2/tweets/:id/quote_tweets
+    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[3] === 'quote_tweets') {
+      const tweetId = pathParts[2];
+      const maxResultsParam = Number(query.max_results);
+      const maxResults = Math.max(1, Math.min(isNaN(maxResultsParam) ? 100 : maxResultsParam, 100));
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const expansions = query.expansions?.split(',') || [];
+
+      try {
+        const searchResult = await rettiwt.tweet.search({ quoted: tweetId }, maxResults, fetchCursor);
+        const list = Array.isArray(searchResult.list) ? searchResult.list : [];
+
+        const v2Tweets = list
+          .filter(tweet => tweet.id !== tweetId)
+          .slice(0, maxResults)
+          .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+          .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+
+        const metaParams = {
+          result_count: v2Tweets.length
+        };
+
+        if (v2Tweets.length > 0) {
+          metaParams.newest_id = v2Tweets[0].id;
+          metaParams.oldest_id = v2Tweets[v2Tweets.length - 1].id;
+        }
+
+        if (searchResult.next) {
+          const nextToken = encodePaginationToken(searchResult.next, 0);
+          if (nextToken) {
+            metaParams.next_token = nextToken;
+          }
+        }
+
+        const responsePayload = {
+          data: v2Tweets,
+          meta: buildMetaObject(metaParams)
+        };
+
+        if (expansions.includes('author_id') && list.length > 0) {
+          const users = new Map();
+          list.slice(0, maxResults).forEach(tweet => {
+            if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
+              const author = transformRettiwtUserToV2(tweet.tweetBy);
+              if (author) {
+                users.set(author.id, applyUserFieldFilter(author, userFieldsParam));
+              }
+            }
+          });
+
+          if (users.size > 0) {
+            responsePayload.includes = {
+              users: Array.from(users.values())
+            };
+          }
+        }
+
+        appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+
+        return res.json(responsePayload);
+      } catch (error) {
+        console.error('Quote tweets error:', error.message);
+        return res.status(503).json({
+          errors: [{
+            message: 'Quote tweets unavailable',
+            detail: error.message,
+            code: 'tweet_quotes_unavailable'
+          }]
+        });
+      }
+    }
+
     // GET /2/tweets?ids=... (multiple tweets)
     if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts.length === 2 && query.ids) {
       const tweetIds = query.ids.split(',');
       const expansions = query.expansions?.split(',') || [];
-      const tweetFields = query['tweet.fields']?.split(',') || [];
-      const userFields = query['user.fields']?.split(',') || [];
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const mediaFieldsParam = query['media.fields'];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
+      const includeAuthorExpansion = expansions.includes('author_id');
       
       const tweets = [];
       const users = new Map(); // Use Map to avoid duplicate users
-      
-      // Fetch each tweet
-      for (const tweetId of tweetIds.slice(0, 100)) { // Limit to 100 tweets
+      const ids = tweetIds.slice(0, 100).map(id => id.trim()).filter(Boolean);
+
+      // Primary: bulk fetch via Rettiwt
+      let rettiwtDetails = [];
+      try {
+        const details = await rettiwt.tweet.details(ids);
+        if (Array.isArray(details)) {
+          rettiwtDetails = details;
+        } else if (details) {
+          rettiwtDetails = [details];
+        }
+      } catch (error) {
+        console.error('Rettiwt bulk tweet details error:', error.message);
+      }
+
+      const rettiwtMap = new Map();
+      rettiwtDetails.forEach(detail => {
+        if (detail && detail.id) {
+          rettiwtMap.set(String(detail.id), detail);
+        }
+      });
+
+      // Fetch each tweet with fallback
+      for (const tweetId of ids) {
+        const detail = rettiwtMap.get(tweetId);
+        if (detail) {
+          const mapped = buildV2TweetFromRettiwt(detail, {
+            tweetFieldsParam,
+            userFieldsParam,
+            mediaCollector
+          });
+          if (mapped && mapped.tweet) {
+            tweets.push(mapped.tweet);
+            if (includeAuthorExpansion && mapped.author && mapped.author.id && !users.has(mapped.author.id)) {
+              users.set(mapped.author.id, mapped.author);
+            }
+            continue;
+          }
+        }
+
         try {
           // Try vxtwitter first
           const vxResponse = await axios.get(
@@ -1332,10 +2923,10 @@ module.exports = async (req, res) => {
             }
           );
 
-          if (vxResponse.data) {
+          if (vxResponse.data && typeof vxResponse.data === 'object' && !String(vxResponse.data).startsWith('<')) {
             const tweet = vxResponse.data;
-            
-            const v2Tweet = {
+
+            const baseTweet = {
               id: tweetId,
               text: tweet.text || '',
               created_at: tweet.date ? new Date(tweet.date).toISOString() : new Date().toISOString(),
@@ -1349,18 +2940,31 @@ module.exports = async (req, res) => {
                 impression_count: tweet.views || 0
               }
             };
-            
+
+            if (Array.isArray(tweet.media) && tweet.media.length > 0) {
+              const mediaKeys = tweet.media
+                .map(resolveMediaKey)
+                .filter(Boolean);
+
+              if (mediaKeys.length > 0) {
+                baseTweet.attachments = {
+                  media_keys: mediaKeys
+                };
+              }
+
+              collectMediaEntities(tweet.media, mediaCollector);
+            }
+
+            const v2Tweet = applyTweetFieldFilter(baseTweet, tweetFieldsParam);
             tweets.push(v2Tweet);
-            
-            // If author_id expansion requested, build user object
-            if (expansions.includes('author_id')) {
+
+            if (includeAuthorExpansion) {
               let userInfo = {
                 id: tweet.user_id || 'unknown',
                 username: tweet.user_screen_name || 'unknown',
                 name: tweet.user_name || 'Unknown'
               };
-              
-              // If username or name is unknown, try oEmbed as fallback
+
               if ((userInfo.username === 'unknown' || userInfo.name === 'Unknown') && !users.has(userInfo.id)) {
                 const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
                 if (oEmbedAuthor) {
@@ -1368,40 +2972,151 @@ module.exports = async (req, res) => {
                   userInfo.name = oEmbedAuthor.name || userInfo.name;
                 }
               }
-              
-              // Add user to map if not already present
+
               if (!users.has(userInfo.id)) {
-                users.set(userInfo.id, userInfo);
+                users.set(userInfo.id, applyUserFieldFilter(userInfo, userFieldsParam));
               }
             }
+
+            continue;
           }
-        } catch (error) {
-          // Skip failed tweets
-          console.error(`Failed to fetch tweet ${tweetId}:`, error.message);
+        } catch (vxError) {
+          // Ignore and try next fallback
+        }
+
+        try {
+          const fxResponse = await axios.get(
+            `https://api.fxtwitter.com/Twitter/status/${tweetId}`,
+            {
+              headers: {
+                'User-Agent': 'Mozilla/5.0'
+              },
+              timeout: 3000
+            }
+          );
+
+          if (fxResponse.data && fxResponse.data.tweet) {
+            const tweet = fxResponse.data.tweet;
+
+            const baseTweet = {
+              id: tweetId,
+              text: tweet.text || '',
+              created_at: tweet.created_at ? new Date(tweet.created_at).toISOString() : new Date().toISOString(),
+              author_id: tweet.author?.id || 'unknown',
+              edit_history_tweet_ids: [tweetId],
+              public_metrics: {
+                retweet_count: tweet.retweets || 0,
+                reply_count: tweet.replies || 0,
+                like_count: tweet.likes || 0,
+                quote_count: tweet.quotes || 0,
+                impression_count: tweet.views || 0
+              }
+            };
+
+            const mediaItems = Array.isArray(tweet.media?.all)
+              ? tweet.media.all
+              : Array.isArray(tweet.media)
+                ? tweet.media
+                : Array.isArray(tweet.attachments)
+                  ? tweet.attachments
+                  : [];
+
+            if (mediaItems.length > 0) {
+              const mediaKeys = mediaItems
+                .map(resolveMediaKey)
+                .filter(Boolean);
+
+              if (mediaKeys.length > 0) {
+                baseTweet.attachments = {
+                  media_keys: mediaKeys
+                };
+              }
+
+              collectMediaEntities(mediaItems, mediaCollector);
+            }
+
+            const v2Tweet = applyTweetFieldFilter(baseTweet, tweetFieldsParam);
+            tweets.push(v2Tweet);
+
+            if (includeAuthorExpansion) {
+              let userInfo = {
+                id: tweet.author?.id || 'unknown',
+                username: tweet.author?.screen_name || 'unknown',
+                name: tweet.author?.name || 'Unknown'
+              };
+
+              if ((userInfo.username === 'unknown' || userInfo.name === 'Unknown') && !users.has(userInfo.id)) {
+                const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
+                if (oEmbedAuthor) {
+                  userInfo.username = oEmbedAuthor.username || userInfo.username;
+                  userInfo.name = oEmbedAuthor.name || userInfo.name;
+                }
+              }
+
+              if (!users.has(userInfo.id)) {
+                users.set(userInfo.id, applyUserFieldFilter(userInfo, userFieldsParam));
+              }
+            }
+
+            continue;
+          }
+        } catch (fxError) {
+          console.error(`Failed to fetch tweet ${tweetId}:`, fxError.message);
         }
       }
-      
+
       const response = {
         data: tweets,
-        meta: {
-          result_count: tweets.length
-        }
+        meta: buildMetaObject({ result_count: tweets.length })
       };
-      
-      // Add includes if expansions were requested
+
       if (expansions.includes('author_id') && users.size > 0) {
         response.includes = {
           users: Array.from(users.values())
         };
       }
-      
+
+      appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
+
       return res.json(response);
     }
 
     // GET /2/tweets/:id (single tweet)
     if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts.length === 3) {
       const tweetId = pathParts[2];
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const includeAuthorExpansion = expansions.includes('author_id');
+      const mediaFieldsParam = query['media.fields'];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
       
+      // Primary: use Rettiwt tweet details (guest-capable)
+      try {
+        const rettiwtTweet = await rettiwt.tweet.details(tweetId);
+        if (rettiwtTweet) {
+          const mapped = buildV2TweetFromRettiwt(rettiwtTweet, {
+            tweetFieldsParam,
+            userFieldsParam,
+            mediaCollector
+          });
+
+          if (mapped && mapped.tweet) {
+            const responsePayload = { data: mapped.tweet };
+
+            if (includeAuthorExpansion && mapped.author) {
+              responsePayload.includes = { users: [mapped.author] };
+            }
+
+            appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+            return res.json(responsePayload);
+          }
+        }
+      } catch (error) {
+        console.error('Rettiwt tweet details error:', error.message);
+      }
+
       try {
         // Try vxtwitter first
         const vxResponse = await axios.get(
@@ -1416,12 +3131,10 @@ module.exports = async (req, res) => {
 
         if (vxResponse.data) {
           const tweet = vxResponse.data;
-          
-          // Check if tweet.fields was requested
-          const tweetFields = query['tweet.fields']?.split(',') || [];
-          const includeAllFields = tweetFields.length > 0;
-          
-          const v2Tweet = {
+
+          const includeAllFields = Boolean(tweetFieldsParam);
+
+          const baseTweet = {
             id: tweetId,
             text: tweet.text || '',
             created_at: tweet.date ? new Date(tweet.date).toISOString() : new Date().toISOString(),
@@ -1435,52 +3148,62 @@ module.exports = async (req, res) => {
               impression_count: tweet.views || 0
             }
           };
-          
-          // Add additional fields when requested
+
           if (includeAllFields) {
-            // Add conversation_id (default to tweet ID)
-            v2Tweet.conversation_id = tweet.conversation_id || tweetId;
-            
-            // Add language if available
+            baseTweet.conversation_id = tweet.conversation_id || tweetId;
             if (tweet.lang) {
-              v2Tweet.lang = tweet.lang;
+              baseTweet.lang = tweet.lang;
             }
-            
-            // Add possibly_sensitive flag
             if (tweet.possibly_sensitive !== undefined) {
-              v2Tweet.possibly_sensitive = tweet.possibly_sensitive;
+              baseTweet.possibly_sensitive = tweet.possibly_sensitive;
             }
-            
-            // Add media attachments if available
-            if (tweet.media && tweet.media.length > 0) {
-              v2Tweet.attachments = {
-                media_keys: tweet.media.map(m => m.id || m.url)
+          }
+
+          if (Array.isArray(tweet.media) && tweet.media.length > 0) {
+            const mediaKeys = tweet.media
+              .map(resolveMediaKey)
+              .filter(Boolean);
+
+            if (mediaKeys.length > 0) {
+              baseTweet.attachments = {
+                media_keys: mediaKeys
               };
             }
+
+            collectMediaEntities(tweet.media, mediaCollector);
           }
-          
-          // Build user object for includes
-          let userInfo = {
-            id: tweet.user_id || 'unknown',
-            username: tweet.user_screen_name || 'unknown',
-            name: tweet.user_name || 'Unknown'
+
+          const filteredTweet = applyTweetFieldFilter(baseTweet, tweetFieldsParam);
+
+          let includes;
+          if (includeAuthorExpansion) {
+            let userInfo = {
+              id: tweet.user_id || 'unknown',
+              username: tweet.user_screen_name || 'unknown',
+              name: tweet.user_name || 'Unknown'
+            };
+
+            if (userInfo.username === 'unknown' || userInfo.name === 'Unknown') {
+              const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
+              if (oEmbedAuthor) {
+                userInfo.username = oEmbedAuthor.username || userInfo.username;
+                userInfo.name = oEmbedAuthor.name || userInfo.name;
+              }
+            }
+
+            includes = {
+              users: [applyUserFieldFilter(userInfo, userFieldsParam)]
+            };
+          }
+
+          const responsePayload = {
+            data: filteredTweet,
+            ...(includes ? { includes } : {})
           };
-          
-          // If username or name is unknown, try oEmbed as fallback
-          if (userInfo.username === 'unknown' || userInfo.name === 'Unknown') {
-            const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
-            if (oEmbedAuthor) {
-              userInfo.username = oEmbedAuthor.username || userInfo.username;
-              userInfo.name = oEmbedAuthor.name || userInfo.name;
-            }
-          }
-          
-          return res.json({
-            data: v2Tweet,
-            includes: {
-              users: [userInfo]
-            }
-          });
+
+          appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+
+          return res.json(responsePayload);
         }
       } catch (vxError) {
         // Try fxtwitter as fallback
@@ -1497,42 +3220,75 @@ module.exports = async (req, res) => {
 
           if (fxResponse.data && fxResponse.data.tweet) {
             const tweet = fxResponse.data.tweet;
-            
-            // Build user object for includes
-            let userInfo = {
-              id: tweet.author?.id || 'unknown',
-              username: tweet.author?.screen_name || 'unknown',
-              name: tweet.author?.name || 'Unknown'
+
+            const baseTweet = {
+              id: tweetId,
+              text: tweet.text || '',
+              created_at: tweet.created_at ? new Date(tweet.created_at).toISOString() : new Date().toISOString(),
+              author_id: tweet.author?.id || 'unknown',
+              edit_history_tweet_ids: [tweetId],
+              public_metrics: {
+                retweet_count: tweet.retweets || 0,
+                reply_count: tweet.replies || 0,
+                like_count: tweet.likes || 0,
+                quote_count: tweet.quotes || 0,
+                impression_count: tweet.views || 0
+              }
             };
-            
-            // If username or name is unknown, try oEmbed as fallback
-            if (userInfo.username === 'unknown' || userInfo.name === 'Unknown') {
-              const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
-              if (oEmbedAuthor) {
-                userInfo.username = oEmbedAuthor.username || userInfo.username;
-                userInfo.name = oEmbedAuthor.name || userInfo.name;
+
+            const mediaItems = Array.isArray(tweet.media?.all)
+              ? tweet.media.all
+              : Array.isArray(tweet.media)
+                ? tweet.media
+                : Array.isArray(tweet.attachments)
+                  ? tweet.attachments
+                  : [];
+
+            if (mediaItems.length > 0) {
+              const mediaKeys = mediaItems
+                .map(resolveMediaKey)
+                .filter(Boolean);
+
+              if (mediaKeys.length > 0) {
+                baseTweet.attachments = {
+                  media_keys: mediaKeys
+                };
               }
+
+              collectMediaEntities(mediaItems, mediaCollector);
             }
-            
-            return res.json({
-              data: {
-                id: tweetId,
-                text: tweet.text || '',
-                created_at: tweet.created_at ? new Date(tweet.created_at).toISOString() : new Date().toISOString(),
-                author_id: userInfo.id,
-                edit_history_tweet_ids: [tweetId],
-                public_metrics: {
-                  retweet_count: tweet.retweets || 0,
-                  reply_count: tweet.replies || 0,
-                  like_count: tweet.likes || 0,
-                  quote_count: 0,
-                  impression_count: 0
+
+            const filteredTweet = applyTweetFieldFilter(baseTweet, tweetFieldsParam);
+
+            let includes;
+            if (includeAuthorExpansion) {
+              let userInfo = {
+                id: tweet.author?.id || 'unknown',
+                username: tweet.author?.screen_name || 'unknown',
+                name: tweet.author?.name || 'Unknown'
+              };
+
+              if (userInfo.username === 'unknown' || userInfo.name === 'Unknown') {
+                const oEmbedAuthor = await fetchAuthorFromOEmbed(tweetId);
+                if (oEmbedAuthor) {
+                  userInfo.username = oEmbedAuthor.username || userInfo.username;
+                  userInfo.name = oEmbedAuthor.name || userInfo.name;
                 }
-              },
-              includes: {
-                users: [userInfo]
               }
-            });
+
+              includes = {
+                users: [applyUserFieldFilter(userInfo, userFieldsParam)]
+              };
+            }
+
+            const responsePayload = {
+              data: filteredTweet,
+              ...(includes ? { includes } : {})
+            };
+
+            appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+
+            return res.json(responsePayload);
           }
         } catch (fxError) {
           // Both failed
@@ -1544,6 +3300,15 @@ module.exports = async (req, res) => {
           message: 'Tweet not found'
         }]
       });
+    }
+
+    // Unsupported auth-required endpoints: counts and full-archive search
+    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[2] === 'counts' && (pathParts[3] === 'recent' || pathParts[3] === 'all')) {
+      return authRequired('This endpoint requires elevated or academic access');
+    }
+
+    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[2] === 'search' && pathParts[3] === 'all') {
+      return authRequired('This endpoint requires full-archive (academic) access');
     }
 
     // GET /2/tweets/search/recent
@@ -1559,66 +3324,192 @@ module.exports = async (req, res) => {
       }
 
       const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const mediaFieldsParam = query['media.fields'];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      
+      // Check if date filtering is requested
+      const hasDateFilter = query.start_time || query.end_time;
+      
+      if (hasDateFilter) {
+        // Use Nitter for date-filtered searches
+        let nitterQuery = searchQuery;
+        
+        // Add date filters to the query
+        if (query.start_time) {
+          const startDate = new Date(query.start_time).toISOString().split('T')[0];
+          nitterQuery += ` since:${startDate}`;
+        }
+        if (query.end_time) {
+          const endDate = new Date(query.end_time).toISOString().split('T')[0];
+          nitterQuery += ` until:${endDate}`;
+        }
+        
+        try {
+          const nitterResponse = await axios.get(
+            `${NITTER_API}/search`,
+            {
+              params: {
+                q: nitterQuery
+              },
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+              },
+              timeout: 8000
+            }
+          );
+          
+          const timeline = nitterResponse.data?.data?.timeline || [];
+          const mediaCollector = includeMediaExpansion ? new Map() : null;
 
-      // Build Rettiwt search parameters
+          const v2Tweets = timeline
+            .slice(0, maxResults)
+            .map(tweet => {
+              const baseTweet = {
+                id: tweet.id,
+                text: tweet.text || '',
+                created_at: tweet.time ? new Date(tweet.time * 1000).toISOString() : new Date().toISOString(),
+                author_id: tweet.userId || tweet.user?.id,
+                edit_history_tweet_ids: [tweet.id],
+                public_metrics: {
+                  retweet_count: tweet.retweets || 0,
+                  reply_count: tweet.replies || 0,
+                  like_count: tweet.likes || 0,
+                  quote_count: tweet.quotes || 0
+                }
+              };
+
+              if (Array.isArray(tweet.media) && tweet.media.length > 0) {
+                const mediaKeys = tweet.media
+                  .map(resolveMediaKey)
+                  .filter(Boolean);
+
+                if (mediaKeys.length > 0) {
+                  baseTweet.attachments = {
+                    media_keys: mediaKeys
+                  };
+                }
+
+                collectMediaEntities(tweet.media, mediaCollector);
+              }
+
+              return applyTweetFieldFilter(baseTweet, tweetFieldsParam);
+            });
+
+          const metaParams = {
+            result_count: v2Tweets.length
+          };
+          if (v2Tweets.length > 0) {
+            metaParams.newest_id = v2Tweets[0].id;
+            metaParams.oldest_id = v2Tweets[v2Tweets.length - 1].id;
+          }
+
+          const response = {
+            data: v2Tweets,
+            meta: buildMetaObject(metaParams)
+          };
+
+          if (expansions.includes('author_id')) {
+            const users = new Map();
+
+            timeline.slice(0, maxResults).forEach(tweet => {
+              if (tweet.user && !users.has(tweet.user.id)) {
+                const user = transformNitterUserToV2(tweet.user);
+                if (user) {
+                  users.set(user.id, applyUserFieldFilter(user, userFieldsParam));
+                }
+              }
+            });
+
+            if (users.size > 0) {
+              response.includes = {
+                users: Array.from(users.values())
+              };
+            }
+          }
+
+          appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
+
+          return res.json(response);
+        } catch (error) {
+          console.error('Nitter search error:', error.message);
+          // Fall through to use Rettiwt without date filtering
+        }
+      }
+
+      // Use Rettiwt for non-date-filtered searches
+      // Parse search operators from the query
       const searchParams = {
-        includeWords: [searchQuery],
         count: maxResults
       };
-
-      // Add date filtering if provided
-      if (query.start_time) {
-        const startDate = new Date(query.start_time);
-        searchParams.startDate = startDate.toISOString().split('T')[0];
+      
+      // Extract from:username operator
+      const fromMatch = searchQuery.match(/from:(\S+)/);
+      if (fromMatch) {
+        searchParams.fromUsers = [fromMatch[1]];
+        // Remove from: operator from the query
+        searchQuery = searchQuery.replace(/from:\S+/g, '').trim();
       }
       
-      if (query.end_time) {
-        const endDate = new Date(query.end_time);
-        searchParams.endDate = endDate.toISOString().split('T')[0];
+      // Extract to:username operator
+      const toMatch = searchQuery.match(/to:(\S+)/);
+      if (toMatch) {
+        searchParams.toUsers = [toMatch[1]];
+        searchQuery = searchQuery.replace(/to:\S+/g, '').trim();
+      }
+      
+      // Add remaining query as includeWords if not empty
+      if (searchQuery) {
+        searchParams.includeWords = [searchQuery];
       }
 
       try {
         // Use Rettiwt for search
         const searchResult = await rettiwt.tweet.search(searchParams);
 
-        // Transform Rettiwt tweets to v2 format
         const tweets = searchResult.list || [];
-        const v2Tweets = tweets.slice(0, maxResults).map(tweet => transformRettiwtTweetToV2(tweet));
-        
-        // Build response
+        const mediaCollector = includeMediaExpansion ? new Map() : null;
+        const v2Tweets = tweets
+          .slice(0, maxResults)
+          .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+          .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+
+        const metaParams = {
+          result_count: v2Tweets.length
+        };
+        if (v2Tweets.length > 0) {
+          metaParams.newest_id = v2Tweets[0].id;
+          metaParams.oldest_id = v2Tweets[v2Tweets.length - 1].id;
+        }
+
         const response = {
           data: v2Tweets,
-          meta: {
-            result_count: v2Tweets.length
-          }
+          meta: buildMetaObject(metaParams)
         };
-        
-        // Add pagination info if available
-        if (v2Tweets.length > 0) {
-          response.meta.newest_id = v2Tweets[0].id;
-          response.meta.oldest_id = v2Tweets[v2Tweets.length - 1].id;
-        }
-        
-        // Check if expansions were requested
-        const expansions = query.expansions?.split(',') || [];
-        
-        // Add includes if author_id expansion was requested
+
         if (expansions.includes('author_id') && tweets.length > 0) {
           const users = new Map();
-          
+
           tweets.slice(0, maxResults).forEach(tweet => {
             if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
-              users.set(tweet.tweetBy.id, transformRettiwtUserToV2(tweet.tweetBy));
+              const author = transformRettiwtUserToV2(tweet.tweetBy);
+              if (author) {
+                users.set(author.id, applyUserFieldFilter(author, userFieldsParam));
+              }
             }
           });
-          
+
           if (users.size > 0) {
             response.includes = {
               users: Array.from(users.values())
             };
           }
         }
-        
+
+        appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
+
         return res.json(response);
       } catch (error) {
         console.error('Search error:', error.message);
@@ -1630,38 +3521,6 @@ module.exports = async (req, res) => {
         });
       }
     }
-            'Authorization': `Bearer ${BEARER_TOKEN}`,
-            'x-guest-token': guestToken
-          }
-        }
-      );
-
-      if (response.data && response.data.length > 0) {
-        const trends = response.data[0].trends || [];
-        
-        return res.json({
-          data: trends.map((trend, index) => ({
-            id: `trend_${woeid}_${index}`,
-            name: trend.name,
-            url: trend.url,
-            query: trend.query,
-            tweet_volume: trend.tweet_volume,
-            promoted_content: trend.promoted_content
-          })),
-          meta: {
-            location: response.data[0].locations?.[0] || { name: 'Unknown', woeid },
-            as_of: response.data[0].as_of,
-            created_at: response.data[0].created_at,
-            result_count: trends.length
-          }
-        });
-      }
-
-      return res.json({
-        data: [],
-        meta: { result_count: 0 }
-      });
-    }
 
     // RETTIWT-POWERED ADDITIONAL ENDPOINTS
     
@@ -1669,6 +3528,8 @@ module.exports = async (req, res) => {
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'liked_tweets') {
       const userId = pathParts[2];
       const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
       
       try {
         // Rettiwt doesn't have a direct liked_tweets endpoint
@@ -1689,103 +3550,24 @@ module.exports = async (req, res) => {
       }
     }
     
-    // GET /2/tweets/:id/liking_users - Get users who liked a tweet
-    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[3] === 'liking_users') {
-      const tweetId = pathParts[2];
-      const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
-      
-      try {
-        // This endpoint typically requires authentication
-        // Rettiwt might not support this directly
-        return res.status(403).json({
-          errors: [{
-            message: 'This endpoint requires authentication',
-            code: 'authentication_required'
-          }]
-        });
-      } catch (error) {
-        console.error('Liking users error:', error.message);
-        return res.status(500).json({
-          errors: [{
-            message: 'Failed to fetch liking users'
-          }]
-        });
-      }
-    }
-    
-    // GET /2/tweets/:id/retweeted_by - Get users who retweeted a tweet
-    if (pathParts[0] === '2' && pathParts[1] === 'tweets' && pathParts[3] === 'retweeted_by') {
-      const tweetId = pathParts[2];
-      const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
-      
-      try {
-        const retweeters = await rettiwt.tweet.retweeters(tweetId);
-        
-        if (retweeters && retweeters.list) {
-          const users = retweeters.list.slice(0, maxResults).map(user => transformRettiwtUserToV2(user));
-          
-          return res.json({
-            data: users,
-            meta: {
-              result_count: users.length
-            }
-          });
-        }
-        
-        return res.json({
-          data: [],
-          meta: {
-            result_count: 0
-          }
-        });
-      } catch (error) {
-        console.error('Retweeters error:', error.message);
-        return res.status(500).json({
-          errors: [{
-            message: 'Failed to fetch retweeters'
-          }]
-        });
-      }
-    }
-    
     // GET /2/users/:id/mentions - Get tweets mentioning a user
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'mentions') {
       const userId = pathParts[2];
       const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
-      const paginationToken = query.pagination_token;
-      
+      const { cursor } = parsePaginationToken(query.pagination_token);
+      const fetchCursor = cursor === undefined ? undefined : cursor;
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const expansions = query.expansions?.split(',') || [];
+      const mediaFieldsParam = query['media.fields'];
+      const includeMediaExpansion = expansions.includes('attachments.media_keys');
+      const mediaCollector = includeMediaExpansion ? new Map() : null;
+
       try {
-        // First, we need to get the username for the user ID
-        // Try to get user details from rettiwt or use Nitter
-        let username = null;
-        
-        // Try rettiwt first for user details
-        try {
-          const userDetails = await rettiwt.user.details(userId);
-          if (userDetails && userDetails.userName) {
-            username = userDetails.userName;
-          }
-        } catch (rettiwtError) {
-          console.log('Rettiwt user details failed, trying alternative methods');
-        }
-        
-        // If rettiwt failed, try getting user from a timeline request
+        const userProfile = await fetchRettiwtUserProfile(userId);
+        const username = userProfile?.username;
+
         if (!username) {
-          try {
-            const timeline = await rettiwt.user.timeline(userId);
-            if (timeline && timeline.list && timeline.list.length > 0) {
-              const firstTweet = timeline.list[0];
-              if (firstTweet && firstTweet.tweetBy && firstTweet.tweetBy.userName) {
-                username = firstTweet.tweetBy.userName;
-              }
-            }
-          } catch (timelineError) {
-            console.log('Timeline fetch failed for username');
-          }
-        }
-        
-        if (!username) {
-          // If we still don't have a username, return an error
           return res.status(404).json({
             errors: [{
               message: 'User not found',
@@ -1793,236 +3575,70 @@ module.exports = async (req, res) => {
             }]
           });
         }
-        
-        // Now use Nitter search to find mentions
-        const searchQuery = `@${username}`;
-        
-        const nitterResponse = await axios.get(
-          `${NITTER_API}/search`,
-          {
-            params: {
-              q: searchQuery,
-              cursor: paginationToken
-            },
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 8000
-          }
-        );
-        
-        // Handle both old and new Nitter response formats
-        const responseData = nitterResponse.data.data || nitterResponse.data;
-        const timeline = responseData.timeline || [];
-        const tweets = responseData.tweets || timeline;
-        const users = responseData.users || [];
-        
-        // Check if tweet.fields was requested
-        const tweetFields = query['tweet.fields']?.split(',') || [];
-        const includeAllFields = tweetFields.length > 0;
-        
-        // Transform tweets to v2 format
-        const v2Tweets = (Array.isArray(tweets) ? tweets : [])
+
+        const searchResult = await rettiwt.tweet.search({ mentions: [username] }, maxResults, fetchCursor);
+        const tweets = searchResult.list || [];
+
+        const v2Tweets = tweets
           .slice(0, maxResults)
-          .map(tweet => {
-            // Handle both formats
-            const tweetId = tweet.id || tweet.tweetId;
-            const text = tweet.text || tweet.fullText || '';
-            const authorId = tweet.userId || tweet.user?.id || 'unknown';
-            
-            // Convert Unix timestamp if available (Nitter format), otherwise use other date formats
-            const dateValue = tweet.time ? new Date(tweet.time * 1000).toISOString() : 
-                             tweet.date ? new Date(tweet.date).toISOString() :
-                             tweet.createdAt ? new Date(tweet.createdAt).toISOString() :
-                             new Date().toISOString();
-            
-            // Extract username from tweet data or user object
-            const username = tweet.user?.username || tweet.user?.screen_name || tweet.username || tweet.screen_name || null;
-            
-            // Extract profile image from tweet data or user object
-            const profileImageUrl = tweet.user?.profile_image_url || tweet.user?.profile_image_url_https || 
-                                   tweet.user?.profileImage || tweet.user?.userPic || tweet.user?.avatar || null;
-            
-            const v2Tweet = {
-              id: tweetId,
-              text: text,
-              created_at: dateValue,
-              author_id: authorId,
-              edit_history_tweet_ids: [tweetId],
-              public_metrics: {
-                retweet_count: tweet.retweets || tweet.retweetCount || 0,
-                reply_count: tweet.replies || tweet.replyCount || 0,
-                like_count: tweet.likes || tweet.likeCount || 0,
-                quote_count: tweet.quotes || tweet.quoteCount || 0,
-                impression_count: tweet.views || 0
-              }
-            };
-            
-            // Add author_username directly to the tweet if available
-            if (username) {
-              v2Tweet.author_username = username;
-            }
-            
-            // Add author_profile_image directly to the tweet if available
-            if (profileImageUrl) {
-              v2Tweet.author_profile_image = profileImageUrl.startsWith('http') 
-                ? profileImageUrl 
-                : `https://pbs.twimg.com/${profileImageUrl.replace(/^\//, '')}`;
-            }
-            
-            // Add additional fields when requested
-            if (includeAllFields) {
-              // Add conversation_id
-              if (tweet.conversationId) {
-                v2Tweet.conversation_id = tweet.conversationId;
-              } else {
-                v2Tweet.conversation_id = tweetId;
-              }
-              
-              // Add language if available
-              if (tweet.lang) {
-                v2Tweet.lang = tweet.lang;
-              }
-              
-              // Add possibly_sensitive flag
-              if (tweet.sensitive !== undefined) {
-                v2Tweet.possibly_sensitive = tweet.sensitive;
-              }
-              
-              // Add reply info
-              if (tweet.replyTo || tweet.in_reply_to_user_id) {
-                v2Tweet.in_reply_to_user_id = tweet.replyTo || tweet.in_reply_to_user_id;
-              }
-              
-              // Add entities if available
-              if (tweet.hashtags || tweet.mentions || tweet.urls || tweet.entities) {
-                v2Tweet.entities = {};
-                
-                if (tweet.hashtags && tweet.hashtags.length > 0) {
-                  v2Tweet.entities.hashtags = tweet.hashtags;
-                } else if (tweet.entities?.hashtags) {
-                  v2Tweet.entities.hashtags = tweet.entities.hashtags;
-                }
-                
-                if (tweet.mentions && tweet.mentions.length > 0) {
-                  v2Tweet.entities.mentions = tweet.mentions;
-                } else if (tweet.entities?.mentions) {
-                  v2Tweet.entities.mentions = tweet.entities.mentions;
-                }
-                
-                if (tweet.urls && tweet.urls.length > 0) {
-                  v2Tweet.entities.urls = tweet.urls;
-                } else if (tweet.entities?.urls) {
-                  v2Tweet.entities.urls = tweet.entities.urls;
-                }
-              }
-              
-              // Add media attachments
-              if (tweet.media && tweet.media.length > 0) {
-                v2Tweet.attachments = {
-                  media_keys: tweet.media.map(m => m.id || m.url)
-                };
-              }
-            }
-            
-            return v2Tweet;
-          });
-        
-        // Build meta object
+          .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+          .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+
         const metaParams = {
           result_count: v2Tweets.length
         };
-        
+
         if (v2Tweets.length > 0) {
           metaParams.newest_id = v2Tweets[0].id;
           metaParams.oldest_id = v2Tweets[v2Tweets.length - 1].id;
         }
-        
-        // Check for pagination token
-        const cursor = nitterResponse.data.cursor || 
-                       responseData.pagination?.bottom || 
-                       responseData.pagination?.cursor ||
-                       responseData.cursor;
-        
-        if (cursor) {
-          metaParams.next_token = cursor;
+
+        if (searchResult.next) {
+          const nextToken = encodePaginationToken(searchResult.next, 0);
+          if (nextToken) {
+            metaParams.next_token = nextToken;
+          }
         }
-        
-        const response = {
+
+        const responsePayload = {
           data: v2Tweets,
           meta: buildMetaObject(metaParams)
         };
-        
-        // Build user map from tweets and users data
-        const userMap = new Map();
-        
-        // First, add users from the users array if available
-        if (users.length > 0) {
-          users.forEach(user => {
-            userMap.set(user.id, {
-              id: user.id,
-              username: user.username,
-              name: user.name,
-              created_at: user.joined ? new Date(user.joined).toISOString() : undefined,
-              protected: user.protected || false,
-              description: user.bio || '',
-              location: user.location || '',
-              url: user.website || '',
-              verified: user.verified || false,
-              profile_image_url: user.avatar ? (user.avatar.startsWith('http') ? user.avatar : `https://pbs.twimg.com/${user.avatar.replace(/^\//, '')}`) : null,
-              public_metrics: {
-                followers_count: user.followers || 0,
-                following_count: user.following || 0,
-                tweet_count: user.tweets || 0,
-                listed_count: 0
+
+        if (expansions.includes('author_id') && tweets.length > 0) {
+          const users = new Map();
+
+          tweets.slice(0, maxResults).forEach(tweet => {
+            if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
+              const author = transformRettiwtUserToV2(tweet.tweetBy);
+              if (author) {
+                users.set(author.id, applyUserFieldFilter(author, userFieldsParam));
               }
-            });
+            }
           });
-        }
-        
-        // Then, extract user data from tweets themselves if not already in map
-        (Array.isArray(tweets) ? tweets : []).forEach(tweet => {
-          if (tweet.user && !userMap.has(tweet.user.id || tweet.userId)) {
-            const userId = tweet.user.id || tweet.userId || tweet.user?.id_str;
-            const profileImageUrl = tweet.user.profile_image_url || tweet.user.profile_image_url_https || 
-                                   tweet.user.profileImage || tweet.user.userPic || tweet.user.avatar;
-            
-            userMap.set(userId, {
-              id: userId,
-              username: tweet.user.username || tweet.user.screen_name || tweet.username,
-              name: tweet.user.name || tweet.user.fullName || tweet.user.fullname,
-              protected: tweet.user.protected || false,
-              description: tweet.user.description || tweet.user.bio || '',
-              verified: tweet.user.verified || false,
-              profile_image_url: profileImageUrl ? (profileImageUrl.startsWith('http') ? profileImageUrl : `https://pbs.twimg.com/${profileImageUrl.replace(/^\//, '')}`) : null,
-              public_metrics: {
-                followers_count: tweet.user.followers_count || tweet.user.followers || 0,
-                following_count: tweet.user.following_count || tweet.user.following || tweet.user.friends_count || 0,
-                tweet_count: tweet.user.statuses_count || tweet.user.tweets || 0,
-                listed_count: tweet.user.listed_count || 0
-              }
-            });
+
+          if (users.size > 0) {
+            responsePayload.includes = {
+              users: Array.from(users.values())
+            };
           }
-        });
-        
-        // Add includes if we have user data and expansions requested
-        if (query.expansions && userMap.size > 0) {
-          response.includes = {
-            users: Array.from(userMap.values())
-          };
         }
-        
-        return res.json(response);
+
+        appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+
+        return res.json(responsePayload);
       } catch (error) {
         console.error('Mentions error:', error.message);
-        return res.status(500).json({
+        return res.status(503).json({
           errors: [{
-            message: 'Failed to fetch mentions'
+            message: 'Mentions unavailable',
+            detail: error.message,
+            code: 'mentions_unavailable'
           }]
         });
       }
     }
-    
+
     // GET /2/users/:id/bookmarks - Get user's bookmarked tweets
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'bookmarks') {
       const userId = pathParts[2];
@@ -2032,10 +3648,18 @@ module.exports = async (req, res) => {
         const bookmarks = await rettiwt.user.bookmarks();
         
         if (bookmarks && bookmarks.list) {
-          const tweets = bookmarks.list.slice(0, maxResults).map(tweet => transformRettiwtTweetToV2(tweet));
-          
-          // Build includes section with users if expansion requested
+          const tweetFieldsParam = query['tweet.fields'];
+          const userFieldsParam = query['user.fields'];
+          const mediaFieldsParam = query['media.fields'];
           const expansions = query.expansions?.split(',') || [];
+          const includeMediaExpansion = expansions.includes('attachments.media_keys');
+          const mediaCollector = includeMediaExpansion ? new Map() : null;
+
+          const rawTweets = bookmarks.list.slice(0, maxResults);
+          const tweets = rawTweets
+            .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+            .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+          
           const response = {
             data: tweets,
             meta: {
@@ -2043,11 +3667,14 @@ module.exports = async (req, res) => {
             }
           };
           
-          if (expansions.includes('author_id') && bookmarks.list.length > 0) {
+          if (expansions.includes('author_id') && rawTweets.length > 0) {
             const users = new Map();
-            bookmarks.list.slice(0, maxResults).forEach(tweet => {
+            rawTweets.forEach(tweet => {
               if (tweet.tweetBy && !users.has(tweet.tweetBy.id)) {
-                users.set(tweet.tweetBy.id, transformRettiwtUserToV2(tweet.tweetBy));
+                const user = transformRettiwtUserToV2(tweet.tweetBy);
+                if (user) {
+                  users.set(user.id, applyUserFieldFilter(user, userFieldsParam));
+                }
               }
             });
             
@@ -2057,6 +3684,8 @@ module.exports = async (req, res) => {
               };
             }
           }
+
+          appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
           
           return res.json(response);
         }
@@ -2083,15 +3712,23 @@ module.exports = async (req, res) => {
     if (pathParts[0] === '2' && pathParts[1] === 'users' && pathParts[3] === 'tweets' && !isNaN(pathParts[2])) {
       const userId = pathParts[2];
       const maxResults = Math.min(parseInt(query.max_results) || 20, 100);
+      const tweetFieldsParam = query['tweet.fields'];
+      const userFieldsParam = query['user.fields'];
+      const mediaFieldsParam = query['media.fields'];
       
       try {
         const timeline = await rettiwt.user.timeline(userId);
         
         if (timeline && timeline.list) {
-          const tweets = timeline.list.slice(0, maxResults).map(tweet => transformRettiwtTweetToV2(tweet));
-          
-          // Build includes section with users if expansion requested
           const expansions = query.expansions?.split(',') || [];
+          const includeMediaExpansion = expansions.includes('attachments.media_keys');
+          const mediaCollector = includeMediaExpansion ? new Map() : null;
+
+          const tweets = timeline.list
+            .slice(0, maxResults)
+            .map(tweet => transformRettiwtTweetToV2(tweet, { mediaCollector }))
+            .map(tweet => applyTweetFieldFilter(tweet, tweetFieldsParam));
+          
           const response = {
             data: tweets,
             meta: {
@@ -2100,14 +3737,18 @@ module.exports = async (req, res) => {
           };
           
           if (expansions.includes('author_id') && timeline.list.length > 0) {
-            // Get unique user from the timeline
             const firstTweet = timeline.list[0];
             if (firstTweet && firstTweet.tweetBy) {
-              response.includes = {
-                users: [transformRettiwtUserToV2(firstTweet.tweetBy)]
-              };
+              const author = transformRettiwtUserToV2(firstTweet.tweetBy);
+              if (author) {
+                response.includes = {
+                  users: [applyUserFieldFilter(author, userFieldsParam)]
+                };
+              }
             }
           }
+
+          appendMediaIncludes(response, mediaCollector, mediaFieldsParam);
           
           return res.json(response);
         }
@@ -2142,6 +3783,8 @@ module.exports = async (req, res) => {
           }]
         });
       }
+
+      const guestToken = await getGuestToken();
 
       const response = await axios.get(
         `${API_BASE}/1.1/geo/search.json`,
