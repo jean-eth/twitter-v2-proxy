@@ -2961,6 +2961,10 @@ module.exports = async (req, res) => {
               }
             };
 
+            if (!baseTweet.text) {
+              throw new Error('vx tweet has no text');
+            }
+
             if (Array.isArray(tweet.media) && tweet.media.length > 0) {
               const mediaKeys = tweet.media
                 .map(resolveMediaKey)
@@ -3032,6 +3036,10 @@ module.exports = async (req, res) => {
                 impression_count: tweet.views || 0
               }
             };
+
+            if (!baseTweet.text) {
+              throw new Error('fx tweet has no text');
+            }
 
             const mediaItems = Array.isArray(tweet.media?.all)
               ? tweet.media.all
@@ -3175,31 +3183,35 @@ module.exports = async (req, res) => {
           }
         );
 
-        if (vxResponse.data) {
-          const tweet = vxResponse.data;
+          if (vxResponse.data) {
+            const tweet = vxResponse.data;
 
-          const includeAllFields = Boolean(tweetFieldsParam);
+            const includeAllFields = Boolean(tweetFieldsParam);
 
-          const baseTweet = {
-            id: tweetId,
-            text: tweet.text || '',
-            created_at: tweet.date ? new Date(tweet.date).toISOString() : new Date().toISOString(),
-            author_id: tweet.user_id || 'unknown',
-            edit_history_tweet_ids: [tweetId],
-            public_metrics: {
-              retweet_count: tweet.retweets || 0,
-              reply_count: tweet.replies || 0,
-              like_count: tweet.likes || 0,
-              quote_count: tweet.quotes || 0,
-              impression_count: tweet.views || 0
-            }
-          };
+            const baseTweet = {
+              id: tweetId,
+              text: tweet.text || '',
+              created_at: tweet.date ? new Date(tweet.date).toISOString() : new Date().toISOString(),
+              author_id: tweet.user_id || 'unknown',
+              edit_history_tweet_ids: [tweetId],
+              public_metrics: {
+                retweet_count: tweet.retweets || 0,
+                reply_count: tweet.replies || 0,
+                like_count: tweet.likes || 0,
+                quote_count: tweet.quotes || 0,
+                impression_count: tweet.views || 0
+              }
+            };
 
-          if (includeAllFields) {
-            baseTweet.conversation_id = tweet.conversation_id || tweetId;
-            if (tweet.lang) {
-              baseTweet.lang = tweet.lang;
-            }
+          if (!baseTweet.text) {
+            throw new Error('vx tweet has no text');
+          }
+
+            if (includeAllFields) {
+              baseTweet.conversation_id = tweet.conversation_id || tweetId;
+              if (tweet.lang) {
+                baseTweet.lang = tweet.lang;
+              }
             if (tweet.possibly_sensitive !== undefined) {
               baseTweet.possibly_sensitive = tweet.possibly_sensitive;
             }
@@ -3281,6 +3293,10 @@ module.exports = async (req, res) => {
                 impression_count: tweet.views || 0
               }
             };
+
+            if (!baseTweet.text) {
+              throw new Error('fx tweet has no text');
+            }
 
             const mediaItems = Array.isArray(tweet.media?.all)
               ? tweet.media.all
