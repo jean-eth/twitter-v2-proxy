@@ -1090,6 +1090,26 @@ function buildV2TweetFromRettiwt(rettiwtTweet, { tweetFieldsParam, userFieldsPar
   return { tweet: filteredTweet, author };
 }
 
+function buildV2TweetFromV1(v1Tweet, { tweetFieldsParam, userFieldsParam, mediaCollector } = {}) {
+  if (!v1Tweet) return null;
+
+  const expansions = {};
+  const v2Tweet = transformTweetToV2(v1Tweet, true, expansions, mediaCollector);
+  if (!v2Tweet) return null;
+
+  const filteredTweet = applyTweetFieldFilter(v2Tweet, tweetFieldsParam);
+
+  let author;
+  if (v1Tweet.user) {
+    const authorCandidate = transformUserToV2(v1Tweet.user, true);
+    if (authorCandidate) {
+      author = applyUserFieldFilter(authorCandidate, userFieldsParam);
+    }
+  }
+
+  return { tweet: filteredTweet, author };
+}
+
 // Fetch author data using Twitter oEmbed API (no auth required)
 async function fetchAuthorFromOEmbed(tweetId) {
   try {
@@ -3063,6 +3083,32 @@ module.exports = async (req, res) => {
         } catch (fxError) {
           console.error(`Failed to fetch tweet ${tweetId}:`, fxError.message);
         }
+
+        // Final fallback: Twitter v1.1 statuses/show via guest token
+        try {
+          const v1Tweet = await fetchTwitterV1('statuses/show.json', {
+            id: tweetId,
+            tweet_mode: 'extended',
+            include_entities: true
+          }, 6000);
+
+          if (v1Tweet && v1Tweet.id_str) {
+            const mapped = buildV2TweetFromV1(v1Tweet, {
+              tweetFieldsParam,
+              userFieldsParam,
+              mediaCollector
+            });
+
+            if (mapped && mapped.tweet) {
+              tweets.push(mapped.tweet);
+              if (includeAuthorExpansion && mapped.author && mapped.author.id && !users.has(mapped.author.id)) {
+                users.set(mapped.author.id, mapped.author);
+              }
+            }
+          }
+        } catch (v1Error) {
+          console.error(`v1 fallback failed for tweet ${tweetId}:`, v1Error.message);
+        }
       }
 
       const response = {
@@ -3204,11 +3250,11 @@ module.exports = async (req, res) => {
           appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
 
           return res.json(responsePayload);
-        }
-      } catch (vxError) {
-        // Try fxtwitter as fallback
-        try {
-          const fxResponse = await axios.get(
+      }
+    } catch (vxError) {
+      // Try fxtwitter as fallback
+      try {
+        const fxResponse = await axios.get(
             `https://api.fxtwitter.com/Twitter/status/${tweetId}`,
             {
               headers: {
@@ -3288,10 +3334,38 @@ module.exports = async (req, res) => {
 
             appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
 
-            return res.json(responsePayload);
+          return res.json(responsePayload);
+        }
+      } catch (fxError) {
+          // Try Twitter v1.1 guest lookup as last resort
+          try {
+            const v1Tweet = await fetchTwitterV1('statuses/show.json', {
+              id: tweetId,
+              tweet_mode: 'extended',
+              include_entities: true
+            }, 6000);
+
+            if (v1Tweet && v1Tweet.id_str) {
+              const mapped = buildV2TweetFromV1(v1Tweet, {
+                tweetFieldsParam,
+                userFieldsParam,
+                mediaCollector
+              });
+
+              if (mapped && mapped.tweet) {
+                const responsePayload = { data: mapped.tweet };
+
+                if (includeAuthorExpansion && mapped.author) {
+                  responsePayload.includes = { users: [mapped.author] };
+                }
+
+                appendMediaIncludes(responsePayload, mediaCollector, mediaFieldsParam);
+                return res.json(responsePayload);
+              }
+            }
+          } catch (v1Error) {
+            console.error('v1 tweet fallback error:', v1Error.message);
           }
-        } catch (fxError) {
-          // Both failed
         }
       }
 
