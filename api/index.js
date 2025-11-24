@@ -1146,6 +1146,20 @@ async function fetchUserByIdV2(userId, userFieldsParam) {
     console.error('User v1 fallback failed:', error.message);
   }
 
+  // Fallback to timeline user (Rettiwt)
+  try {
+    const timeline = await rettiwt.user.timeline(userId);
+    const firstTweet = Array.isArray(timeline?.list) ? timeline.list.find(t => t?.tweetBy) : null;
+    if (firstTweet && firstTweet.tweetBy) {
+      const author = transformRettiwtUserToV2(firstTweet.tweetBy);
+      if (author) {
+        return applyUserFieldFilter(author, userFieldsParam);
+      }
+    }
+  } catch (error) {
+    console.error('User timeline fallback failed:', error.message);
+  }
+
   return null;
 }
 
