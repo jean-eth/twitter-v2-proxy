@@ -1494,15 +1494,27 @@ module.exports = async (req, res) => {
   const path = req.url.replace(/\?.*$/, '');
   const query = req.query;
   const pathParts = path.split('/').filter(p => p);
-  const authRequired = (detail = 'This endpoint requires user authentication', type = 'https://api.twitter.com/2/problems/client-not-enrolled') => {
-    return res.status(403).json({
+  const authRequired = (detail = 'You are not allowed to use this endpoint', type = 'https://api.twitter.com/2/problems/client-not-enrolled') =>
+    res.status(403).json({
       errors: [{
-        title: 'Authorization Error',
+        title: 'Forbidden',
         detail,
         type
       }]
     });
-  };
+
+  const resourceNotFound = (resourceType, value, parameter = 'id') =>
+    res.status(404).json({
+      errors: [{
+        title: 'Not Found Error',
+        detail: `Could not find ${resourceType} with referenced ${parameter}`,
+        type: 'https://api.twitter.com/2/problems/resource-not-found',
+        resource_type: resourceType,
+        parameter,
+        value,
+        resource_id: value
+      }]
+    });
 
   try {
 
@@ -3385,11 +3397,7 @@ module.exports = async (req, res) => {
         }
       }
 
-      return res.status(404).json({
-        errors: [{
-          message: 'Tweet not found'
-        }]
-      });
+      return resourceNotFound('tweet', tweetId, 'id');
     }
 
     // Unsupported auth-required endpoints: counts and full-archive search
