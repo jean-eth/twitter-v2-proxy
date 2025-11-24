@@ -1494,10 +1494,13 @@ module.exports = async (req, res) => {
   const path = req.url.replace(/\?.*$/, '');
   const query = req.query;
   const pathParts = path.split('/').filter(p => p);
-  const authRequired = (detail = 'You are not allowed to use this endpoint', type = 'https://api.twitter.com/2/problems/client-not-enrolled') =>
+  const authRequired = (
+    detail = 'You are not allowed to access or use this endpoint with your environment',
+    type = 'https://api.twitter.com/2/problems/client-not-enrolled'
+  ) =>
     res.status(403).json({
       errors: [{
-        title: 'Forbidden',
+        title: 'Authorization Error',
         detail,
         type
       }]
@@ -1507,7 +1510,7 @@ module.exports = async (req, res) => {
     res.status(404).json({
       errors: [{
         title: 'Not Found Error',
-        detail: `Could not find ${resourceType} with referenced ${parameter}`,
+        detail: `Could not find ${resourceType} with id: ${value}`,
         type: 'https://api.twitter.com/2/problems/resource-not-found',
         resource_type: resourceType,
         parameter,
